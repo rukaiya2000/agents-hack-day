@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import json
 import logging
@@ -42,6 +43,10 @@ MEMORY_INDEX = os.getenv("MOSS_MEMORY_INDEX_NAME", "memory")
 # running `uv run src/agent.py console`). The frontend provides a real
 # per-browser user_id via agent dispatch metadata.
 DEFAULT_USER_ID = "user_1"
+# Marks a memory doc as a price watch (vs. a general remembered fact).
+WATCH_KIND = "watch"
+# Cap concurrent live price re-checks so a long watchlist can't stall a turn.
+MAX_PRICE_REFRESH = 5
 MOSS_NOT_CONFIGURED_MESSAGE = (
     "Moss is not configured yet. Add MOSS_PROJECT_ID and MOSS_PROJECT_KEY "
     "to agent-py/.env.local to enable knowledge search and memory."
@@ -153,6 +158,22 @@ def _voice_noise_cancellation():
     return ai_coustics.audio_enhancement(model=ai_coustics.EnhancerModel.QUAIL_VF_S)
 
 
+def _say_filler(context: RunContext | None, line: str) -> None:
+    """Speak a short hold line so a slow tool doesn't leave dead air.
+
+    Per LiveKit's tool-loop guidance, a tool that can take over a second should
+    start speaking before it finishes. Guarded so unit tests (which pass no
+    RunContext) can call the tools directly.
+    """
+    session = getattr(context, "session", None)
+    if session is None:
+        return
+    try:
+        session.say(line)
+    except Exception:
+        logger.debug("Filler speech failed; continuing", exc_info=True)
+
+
 class Assistant(Agent):
     """Voice agent that wires Moss retrieval + per-user memory into LiveKit."""
 
@@ -189,14 +210,27 @@ class Assistant(Agent):
                   headphones"), ask one short clarifying question about the
                   model, budget, or must-have feature before searching.
 
-                # Watching prices (memory)
+                # Watching prices
 
-                - When the user says to watch an item, remember their budget, or
-                  shares a durable preference (favorite brand, size, target
-                  price, their name), call `remember_fact` to persist it.
-                - When a question depends on something the user told you earlier
-                  (what they are watching, their budget, their preferences),
-                  call `recall_facts` to look it up before answering.
+                - When the user asks you to watch, track, or alert them about a
+                  product ("watch this", "tell me if it drops below 130", "keep
+                  an eye on the XM5"), call `watch_item` with the product and,
+                  if they gave one, the target price.
+                - If they say "watch it" right after you found deals, use the
+                  product you just searched for. If it is genuinely unclear what
+                  to watch, ask one short question first.
+                - Confirm warmly and specifically in one sentence, naming the
+                  product and target — for example "Done, I'm watching the Sony
+                  WH-1000XM5 and I'll flag it under one hundred thirty dollars."
+                  Do not read the list back item by item unless they ask.
+                - When the user asks what they are watching or tracking, call
+                  `list_watches`, then summarize briefly and conversationally.
+                  The full list is shown on screen, so keep the spoken version
+                  short: say how many items and name the most relevant one or
+                  two rather than reciting everything.
+                - For other durable preferences (their name, favorite brand,
+                  sizes, general budget) use `remember_fact`, and `recall_facts`
+                  to look those up.
 
                 # Honesty and safety
 
@@ -234,6 +268,9 @@ class Assistant(Agent):
         )
         self._room = room
         self._user_id = user_id
+        # Strong refs for fire-and-forget work (background price verification),
+        # so the event loop doesn't garbage-collect a running task.
+        self._background_tasks: set[asyncio.Task] = set()
         moss_project_id = os.getenv("MOSS_PROJECT_ID")
         moss_project_key = os.getenv("MOSS_PROJECT_KEY")
         if moss_project_id and moss_project_key:
@@ -337,7 +374,14 @@ class Assistant(Agent):
         from deal_hunter.finder import find_deals as run_find_deals
         from deal_hunter.finder import voice_summary
 
+        # A live search takes a couple of seconds; say something first so the
+        # user isn't sitting in silence.
+        _say_filler(context, "Let me check the latest prices.")
+
         started = time.perf_counter()
+        # Fast path: search only. Opening listing pages to confirm prices costs
+        # seconds, so it happens in the background (below) rather than making
+        # the user sit in silence.
         result = await run_find_deals(query)
         elapsed_ms = (time.perf_counter() - started) * 1000
         logger.info(
@@ -347,7 +391,28 @@ class Assistant(Agent):
             len(result.deals),
         )
         await self._publish_deal_result(result)
+        self._spawn_price_verification(result)
         return voice_summary(result)
+
+    def _spawn_price_verification(self, result) -> None:
+        """Confirm the top prices in the background, then refresh the UI cards.
+
+        The spoken reply has already gone out by this point; when verification
+        lands we re-publish the same result so the on-screen cards pick up their
+        confirmed badges. A strong reference is kept so the task isn't GC'd.
+        """
+        from deal_hunter.finder import verify_top_deals
+
+        async def _run() -> None:
+            try:
+                await verify_top_deals(result)
+                await self._publish_deal_result(result)
+            except Exception:
+                logger.exception("Background price verification failed")
+
+        task = asyncio.create_task(_run())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     @function_tool()
     async def search_knowledge(self, context: RunContext, query: str) -> str:
@@ -433,6 +498,227 @@ class Assistant(Agent):
         if not facts:
             return "I don't have anything remembered for you yet."
         return "\n".join(facts)
+
+    async def _current_best(self, product: str) -> dict[str, Any]:
+        """Look up the current cheapest live listing for a watched product.
+
+        Best-effort: a failed lookup degrades to no price rather than breaking
+        the watchlist.
+        """
+        from deal_hunter.finder import find_deals as run_find_deals
+
+        try:
+            result = await run_find_deals(product, max_results=6)
+        except Exception:
+            logger.exception("Failed to refresh current price for %r", product)
+            return {}
+
+        best = next((d for d in result.deals if d.price is not None), None)
+        if best is None:
+            return {}
+        return {
+            "current_price": best.price,
+            "current_source": best.source,
+            "current_url": best.url,
+        }
+
+    async def _fetch_watches(
+        self, refresh_products: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Read this user's watchlist out of Moss memory, newest-relevant first.
+
+        Watches are stored as regular memory docs carrying
+        `metadata={"kind": "watch", "product": ..., "target_price": ...}`. Moss
+        filters by `user_id`; the `kind` filter and de-duplication happen here so
+        we don't depend on compound-filter support.
+
+        `refresh_products` opts specific products into a live price re-check.
+        Lookups run concurrently so N watches cost roughly one search of latency.
+        """
+        if self._moss is None:
+            return []
+
+        result = await self._moss.query(
+            MEMORY_INDEX,
+            "watching a product for a price drop",
+            QueryOptions(
+                top_k=25,
+                filter={
+                    "field": "user_id",
+                    "condition": {"$eq": self._user_id},
+                },
+            ),
+        )
+
+        watches: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for doc in getattr(result, "docs", None) or []:
+            metadata = getattr(doc, "metadata", None) or {}
+            if metadata.get("kind") != WATCH_KIND:
+                continue
+            product = (metadata.get("product") or "").strip()
+            if not product:
+                continue
+            key = product.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            raw_target = metadata.get("target_price")
+            target: float | None = None
+            if raw_target not in (None, ""):
+                try:
+                    target = float(raw_target)
+                except (TypeError, ValueError):
+                    target = None
+
+            watches.append({"product": product, "target_price": target})
+
+        if refresh_products:
+            wanted = {p.casefold() for p in refresh_products}
+            due = [w for w in watches if str(w["product"]).casefold() in wanted]
+            # Bound the fan-out so a long watchlist can't stall a voice turn.
+            due = due[:MAX_PRICE_REFRESH]
+            if due:
+                prices = await asyncio.gather(
+                    *(self._current_best(str(w["product"])) for w in due),
+                    return_exceptions=True,
+                )
+                for watch, price in zip(due, prices):
+                    if isinstance(price, dict):
+                        watch.update(price)
+
+        return watches
+
+    async def _publish_watchlist(self, watches: list[dict[str, Any]]) -> None:
+        """Publish the user's watchlist for the UI panel."""
+        if self._room is None:
+            return
+        try:
+            payload = {
+                "type": "watchlist",
+                "data": {"watches": watches, "count": len(watches)},
+            }
+            encoded = json.dumps(payload, default=str).encode("utf-8")
+            await self._room.local_participant.publish_data(
+                payload=encoded, reliable=True
+            )
+        except Exception:
+            logger.exception("Failed to publish watchlist data")
+
+    @function_tool()
+    async def watch_item(
+        self,
+        context: RunContext,
+        product: str,
+        target_price: float | None = None,
+    ) -> str:
+        """Add a product to the user's price watchlist.
+
+        Call this whenever the user asks you to watch, track, or alert them
+        about a product's price ("watch this", "tell me if it drops below 130",
+        "keep an eye on the XM5"). Publishes the updated watchlist to the room.
+
+        Args:
+            product: The product to watch, e.g. "Sony WH-1000XM5".
+            target_price: Optional price threshold in dollars to alert below.
+        """
+        if self._moss is None:
+            return MOSS_NOT_CONFIGURED_MESSAGE
+
+        if target_price is not None:
+            text = (
+                f"Watching {product} for a price drop below {target_price:g} dollars."
+            )
+        else:
+            text = f"Watching {product} for a price drop."
+
+        doc = DocumentInfo(
+            id=f"{self._user_id}-watch-{uuid.uuid4()}",
+            text=text,
+            metadata={
+                "user_id": self._user_id,
+                "kind": WATCH_KIND,
+                "product": product,
+                "target_price": "" if target_price is None else str(target_price),
+            },
+        )
+        await self._moss.add_docs(MEMORY_INDEX, [doc])
+        try:
+            await self._moss.load_index(MEMORY_INDEX)
+        except Exception:
+            logger.exception("Failed to reload memory index after watch write")
+
+        await self._publish_watchlist(await self._fetch_watches())
+
+        if target_price is not None:
+            return (
+                f"Added {product} to your watchlist with a target of "
+                f"{target_price:g} dollars."
+            )
+        return f"Added {product} to your watchlist."
+
+    @function_tool()
+    async def list_watches(self, context: RunContext) -> str:
+        """List the products the user is currently watching.
+
+        Call this when the user asks what they are watching or tracking, or
+        when a question depends on their watchlist. Publishes the watchlist to
+        the room so the UI can display it.
+        """
+        if self._moss is None:
+            return MOSS_NOT_CONFIGURED_MESSAGE
+
+        watches = await self._fetch_watches()
+        if not watches:
+            await self._publish_watchlist([])
+            return "The watchlist is empty right now."
+
+        # Re-checking prices hits the web for each item, so hold the floor.
+        _say_filler(context, "Let me check where those stand.")
+
+        # Re-check live prices so the panel (and the reply) show where each
+        # watched item stands right now.
+        watches = await self._fetch_watches(
+            refresh_products=[str(w["product"]) for w in watches]
+        )
+        await self._publish_watchlist(watches)
+
+        parts = []
+        hits = []
+        for watch in watches:
+            product = str(watch["product"])
+            target = watch.get("target_price")
+            current = watch.get("current_price")
+
+            if current is None:
+                parts.append(
+                    product
+                    if target is None
+                    else f"{product}, target {target:g} dollars"
+                )
+                continue
+
+            if target is not None and current <= target:
+                hits.append(
+                    f"{product} is at {current:g} dollars, under your {target:g} target"
+                )
+            elif target is not None:
+                parts.append(f"{product} is at {current:g} dollars, target {target:g}")
+            else:
+                parts.append(f"{product} is at {current:g} dollars")
+
+        # Lead with anything that hit its target — that's the useful news.
+        summary = []
+        if hits:
+            summary.append("Good news: " + "; ".join(hits) + ".")
+        if parts:
+            summary.append(
+                ("Also watching: " if hits else "Currently watching: ")
+                + "; ".join(parts)
+                + "."
+            )
+        return " ".join(summary)
 
 
 server = AgentServer()

@@ -111,8 +111,166 @@ def test_voice_summary_handles_priceless_results():
     result = DealResult(
         query="mystery item",
         country="us",
-        deals=[Deal("Mystery Item listing", "https://x.example", "XSource", None, None, "no price")],
+        deals=[
+            Deal(
+                "Mystery Item listing",
+                "https://x.example",
+                "XSource",
+                None,
+                None,
+                "no price",
+            )
+        ],
     )
     summary = voice_summary(result)
     assert "none showed a clear price" in summary.lower()
     assert "Mystery Item listing" in summary
+
+
+# ---- Bright Data Web Unlocker price verification ----
+
+
+def test_all_prices_and_price_is_on_page():
+    page = "Now $147.26. Shipping $5.99. Protection plan $29.00."
+    assert finder.all_prices(page) == [147.26, 5.99, 29.00]
+    assert finder.price_is_on_page(147.26, page) is True
+    assert finder.price_is_on_page(199.99, page) is False
+    assert finder.price_is_on_page(147.26, None) is False
+
+
+@pytest.mark.asyncio
+async def test_verify_deal_confirms_matching_page_price(monkeypatch):
+    deal = Deal(
+        "XM5", "https://shop.example/xm5", "ShopExample", 147.26, "$147.26", None
+    )
+
+    async def fake_unlock(url, country=None, max_chars=16000):
+        return {"content": "Sony WH-1000XM5 — $147.26 today. Free shipping."}
+
+    monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
+    await finder.verify_deal(deal)
+    assert deal.verified is True
+    # Price is never rewritten by verification.
+    assert deal.price == pytest.approx(147.26)
+
+
+@pytest.mark.asyncio
+async def test_verify_deal_denies_when_price_absent(monkeypatch):
+    deal = Deal(
+        "XM5", "https://shop.example/xm5", "ShopExample", 147.26, "$147.26", None
+    )
+
+    async def fake_unlock(url, country=None, max_chars=16000):
+        return {"content": "Sony WH-1000XM5 — $249.99. Add to cart."}
+
+    monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
+    await finder.verify_deal(deal)
+    assert deal.verified is False
+    # Still no silent correction — we only flag uncertainty.
+    assert deal.price == pytest.approx(147.26)
+
+
+@pytest.mark.asyncio
+async def test_verify_deal_survives_unlocker_failure(monkeypatch):
+    deal = Deal(
+        "XM5", "https://shop.example/xm5", "ShopExample", 147.26, "$147.26", None
+    )
+
+    async def boom(url, country=None, max_chars=16000):
+        raise RuntimeError("unlocker down")
+
+    monkeypatch.setattr(finder, "unlock_url_api", boom)
+    await finder.verify_deal(deal)
+    # Unchecked, not crashed.
+    assert deal.verified is None
+
+
+@pytest.mark.asyncio
+async def test_find_deals_verifies_top_results(monkeypatch):
+    async def fake_serp(query, country=None, max_results=10):
+        return SAMPLE_SERP
+
+    unlocked: list[str] = []
+
+    async def fake_unlock(url, country=None, max_chars=16000):
+        unlocked.append(url)
+        # Cheapest listing ($349.99) confirms; the other does not.
+        return {"content": "price today $349.99"}
+
+    monkeypatch.setattr(finder, "serp_search_api", fake_serp)
+    monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
+
+    result = await find_deals("Sony WH-1000XM5", verify_top=2)
+
+    # Only the two cheapest priced deals get opened.
+    assert len(unlocked) == 2
+    assert result.deals[0].verified is True
+    assert result.deals[1].verified is False
+    # The unpriced review listing is never verified.
+    assert result.deals[-1].verified is None
+
+
+@pytest.mark.asyncio
+async def test_find_deals_can_skip_verification(monkeypatch):
+    async def fake_serp(query, country=None, max_results=10):
+        return SAMPLE_SERP
+
+    async def fail_unlock(url, country=None, max_chars=16000):
+        raise AssertionError("verification should be skipped")
+
+    monkeypatch.setattr(finder, "serp_search_api", fake_serp)
+    monkeypatch.setattr(finder, "unlock_url_api", fail_unlock)
+
+    result = await find_deals("Sony WH-1000XM5", verify_top=0)
+    assert all(d.verified is None for d in result.deals)
+
+
+def test_voice_summary_mentions_confirmation():
+    result = deals_from_serp("Sony WH-1000XM5", "us", SAMPLE_SERP)
+    result.deals[0].verified = True
+    assert "confirmed" in voice_summary(result).lower()
+
+    result.deals[0].verified = False
+    assert "couldn't confirm" in voice_summary(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_find_deals_does_not_verify_by_default(monkeypatch):
+    """The voice path must stay fast: no page opens unless asked."""
+
+    async def fake_serp(query, country=None, max_results=10):
+        return SAMPLE_SERP
+
+    async def fail_unlock(url, country=None, max_chars=16000):
+        raise AssertionError("find_deals must not verify inline by default")
+
+    monkeypatch.setattr(finder, "serp_search_api", fake_serp)
+    monkeypatch.setattr(finder, "unlock_url_api", fail_unlock)
+    monkeypatch.delenv("DEAL_VERIFY_TOP_N", raising=False)
+
+    result = await find_deals("Sony WH-1000XM5")
+    assert all(d.verified is None for d in result.deals)
+
+
+@pytest.mark.asyncio
+async def test_verify_top_deals_isolates_a_slow_page(monkeypatch):
+    """One hanging retailer must not block its siblings from confirming."""
+    import asyncio
+
+    monkeypatch.setattr(finder, "VERIFY_PAGE_TIMEOUT_SECONDS", 0.05)
+
+    async def fake_unlock(url, country=None, max_chars=16000):
+        if "slow" in url:
+            await asyncio.sleep(5)
+        return {"content": "price today $10.00"}
+
+    monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
+
+    slow = Deal("Slow", "https://slow.example/x", "Slow", 10.0, "$10", None)
+    fast = Deal("Fast", "https://fast.example/x", "Fast", 10.0, "$10", None)
+    result = DealResult(query="q", country="us", deals=[slow, fast])
+
+    await finder.verify_top_deals(result, top_n=2, timeout=2)
+
+    assert slow.verified is None  # timed out on its own
+    assert fast.verified is True  # still confirmed

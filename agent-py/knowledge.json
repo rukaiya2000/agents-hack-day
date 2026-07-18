@@ -1,67 +1,54 @@
 [
   {
-    "id": "kb-rag-pattern",
-    "text": "Q: How should a LiveKit voice agent perform retrieval-augmented generation (RAG)? A: Override the on_user_turn_completed node (in livekit.agents) to run a semantic search against your knowledge index using the user's most recent turn, then inject the retrieved snippets into the chat context before the LLM generates its reply. Doing the lookup in this node avoids the extra round-trips of tool calls, so it is usually more responsive than a function-tool lookup. In this starter, the lookup queries the Moss 'knowledge' index via MossClient.query.",
-    "metadata": { "category": "patterns", "topic": "rag" }
+    "id": "kb-what-is-deal-hunter",
+    "text": "Q: What is Deal Hunter and what can it do? A: Deal Hunter is a voice shopping copilot. You say what you want to buy out loud, it searches the live web for current listings, ranks them cheapest first, and reads the best options back to you. It can also watch an item for you: tell it a target price and it will remember the item and target, and tell you where the price stands whenever you ask."
   },
   {
-    "id": "kb-agentic-memory",
-    "text": "Q: How can a voice agent remember things across sessions? A: Expose explicit memory tools such as remember, recall, forget, and search_memory as function tools so the LLM itself decides what to persist and when to retrieve it. Back these tools with a per-user store; in this starter that store is a separate Moss 'memory' index, keyed by a user_id in each document's metadata, so a user's memories stay isolated from the static knowledge base.",
-    "metadata": { "category": "patterns", "topic": "memory" }
+    "id": "kb-how-prices-found",
+    "text": "Q: Where do the prices come from, and are they live? A: Prices come from a live web search run at the moment you ask, not from a cached database or the model's training data. Deal Hunter searches current retailer listings through Bright Data's SERP API, extracts the price from each result, and ranks them cheapest first. Because listings change constantly, a price can still move between the search and your purchase."
   },
   {
-    "id": "kb-interruptions",
-    "text": "Q: How do voice agents handle being interrupted mid-reply, and how do I protect critical actions? A: By default the agent detects user speech during playback and pauses its current reply so the conversation feels natural. For function tools that mutate external state (placing an order, sending a payment), an interruption can leave the operation half-finished with no rollback, so call context.disallow_interruptions() at the start of the tool (Python) to make that turn uninterruptible until it completes.",
-    "metadata": { "category": "voice-agents", "topic": "interruptions" }
+    "id": "kb-price-verification",
+    "text": "Q: How does Deal Hunter know a price is real? A: After answering, it opens the top listing pages in the background through Bright Data's Web Unlocker and checks whether the price it quoted actually appears on the page. Confirmed prices are marked verified on screen. If a price cannot be found on the page it is marked unconfirmed, which means you should double-check before buying. Deal Hunter never rewrites a price by guessing from the page."
   },
   {
-    "id": "kb-turn-detection",
-    "text": "Q: How does a LiveKit agent know when the user has finished speaking? A: Turn detection decides when the user's turn ends so the agent can reply without cutting them off. This starter uses the turn_detector MultilingualModel() plug-in as the turn detector, combined with Silero VAD for voice-activity cues. Alternatives for the turn_detection option include 'stt' (end-of-utterance cues from the STT model), 'vad', 'realtime_llm' (server-side detection from a realtime LLM), or 'manual' for explicit control.",
-    "metadata": { "category": "voice-agents", "topic": "turn-detection" }
+    "id": "kb-watchlist",
+    "text": "Q: How does watching an item work? A: Say something like watch this and tell me if it drops below one hundred thirty. Deal Hunter saves the product and your target price to its memory, so it persists across the conversation and future sessions. When you ask what you are watching, it re-checks the current price of each watched item and shows how far each one is from your target, flagging any that have hit it."
   },
   {
-    "id": "kb-stt-choice",
-    "text": "Q: How do I choose a speech-to-text (STT) provider for a realtime voice agent? A: With LiveKit Inference you select an STT model by name without wiring up provider API keys, since the provider runs server-side. This starter uses inference.STT(model='deepgram/nova-3', language='multi'). For realtime conversation, prefer models with strong streaming and built-in endpointing, and set the language to 'multi' when you need multilingual transcription.",
-    "metadata": { "category": "models", "topic": "stt" }
+    "id": "kb-watch-limits",
+    "text": "Q: Will Deal Hunter alert me on its own when a price drops? A: Not today. It does not poll prices in the background or send notifications. It re-checks prices when you ask what you are watching, and reports where each item stands. Treat the watchlist as something you check in on, not something that pages you."
   },
   {
-    "id": "kb-tts-choice",
-    "text": "Q: How is text-to-speech (TTS) configured in this starter? A: TTS is provided through LiveKit Inference, so no provider key is needed in the agent. The starter uses inference.TTS(model='cartesia/sonic-3', voice='<voice-id>'). To change the agent's voice, pick a different voice id for the same model, or switch to another Inference TTS model; the rest of the AgentSession wiring stays the same.",
-    "metadata": { "category": "models", "topic": "tts" }
+    "id": "kb-memory",
+    "text": "Q: What does Deal Hunter remember about me? A: It remembers durable things you tell it, such as your name, preferred brands, sizes, general budget, and the items you asked it to watch. Memory is stored in a Moss index and scoped to your user id, so one person's watchlist and preferences are never visible to another. It does not store payment details."
   },
   {
-    "id": "kb-llm-inference",
-    "text": "Q: How is the LLM wired up without provider API keys? A: LiveKit Inference proxies the model call, so you reference a model by name instead of holding an OpenAI/Anthropic key in the agent. This starter uses inference.LLM(model='openai/gpt-5.2-chat-latest'). Only LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET are required for STT, LLM, and TTS to work through Inference.",
-    "metadata": { "category": "models", "topic": "llm" }
+    "id": "kb-buying",
+    "text": "Q: Can Deal Hunter buy something for me? A: No. It finds and compares listings and gives you the link to the cheapest one, but it never completes a purchase, enters payment details, or signs in to a retailer on your behalf. You make the actual purchase yourself."
   },
   {
-    "id": "kb-preemptive-generation",
-    "text": "Q: What is preemptive (speculative) speech generation and what is its trade-off? A: With preemptive_generation=True the agent speculatively starts generating (and can run TTS) on the LLM response before the user's turn is fully finalized, reducing perceived latency. The trade-off is wasted compute and higher LLM token usage: if the chat context or tools change in the on_user_turn_completed node — for example after a RAG injection — the speculative response is discarded and regenerated.",
-    "metadata": { "category": "voice-agents", "topic": "latency" }
+    "id": "kb-asking-well",
+    "text": "Q: How should I phrase a request to get the best results? A: Name the specific product and model if you can, for example the cheapest Sony WH-1000XM5 rather than just headphones. You can add constraints like under two hundred dollars or with noise cancelling. If the request is vague, Deal Hunter will ask one short clarifying question before it searches."
   },
   {
-    "id": "kb-noise-cancellation",
-    "text": "Q: How does this starter improve audio quality in noisy environments? A: It applies noise cancellation on the input audio using the ai_coustics plug-in, configured through room_io.AudioInputOptions when the AgentSession's room input is set up. Cleaning the user's audio before STT improves transcription accuracy and turn detection, especially on calls or in noisy rooms.",
-    "metadata": { "category": "voice-agents", "topic": "audio" }
+    "id": "kb-no-results",
+    "text": "Q: What happens if no prices are found? A: Some searches return listings with no clear price, for example review articles or out-of-stock pages. Deal Hunter will say it could not find a clear price rather than inventing one, and will offer to search again with different wording or open a specific listing to read the details."
   },
   {
-    "id": "kb-metrics-usage",
-    "text": "Q: How do I collect cost and usage metrics from an agent session? A: For session-scoped cost and usage tracking, use the session usage surface to aggregate per-model usage across the conversation and export a summary when the session ends. For finer granularity, subscribe to the per-plugin metrics_collected event on each component (STT, LLM, TTS, VAD). Note the older session-level metrics_collected event (session.on('metrics_collected', ...)) is deprecated in favor of the per-plugin event and session usage.",
-    "metadata": { "category": "deployment", "topic": "telemetry" }
+    "id": "kb-stack",
+    "text": "Q: What technology does Deal Hunter run on? A: Three pieces, one job each. LiveKit runs the real-time voice: speech to text, the language model, and text to speech. Bright Data supplies the live web data, using its SERP API to find current listings and its Web Unlocker to read listing pages. Moss provides semantic retrieval and per-user memory, holding the watchlist and preferences. There is no database; the app is stateless apart from Moss memory."
   },
   {
-    "id": "kb-agentserver-pattern",
-    "text": "Q: How is the agent process structured in this starter? A: It uses the AgentServer pattern from livekit.agents rather than WorkerOptions/entrypoint. You create server = AgentServer(), assign server.setup_fnc = prewarm to load Silero VAD into proc.userdata['vad'], and decorate the session handler with @server.rtc_session(agent_name='agent-py') on an async function that takes a JobContext. The process runs via cli.run_app(server) under if __name__ == '__main__'.",
-    "metadata": { "category": "voice-agents", "topic": "architecture" }
+    "id": "kb-accuracy-caveats",
+    "text": "Q: How accurate are the prices, and what are the caveats? A: Prices are parsed from live search results, so they reflect what retailers were advertising moments ago. They can still be wrong in a few ways: a snippet may show a promotional or starting-at price, a listing may be for a different variant or a refurbished unit, and shipping or tax is not included. That is why Deal Hunter opens the top listings to confirm, and marks anything it could not confirm."
   },
   {
-    "id": "kb-explicit-dispatch",
-    "text": "Q: How do I make the frontend dispatch to this specific Python agent? A: The agent registers under agent_name='agent-py' in its @server.rtc_session decorator. For explicit dispatch, the frontend must request that same name: set AGENT_NAME=agent-py in the frontend's .env.local, which flows into app-config.ts (agentName) and the room configuration's agents list. If AGENT_NAME is left blank, the room uses automatic dispatch instead.",
-    "metadata": { "category": "deployment", "topic": "dispatch" }
+    "id": "kb-privacy",
+    "text": "Q: Is my data private? A: Your watchlist and remembered preferences are stored against your own user id and every recall is filtered to that id, so other users cannot see them. Deal Hunter does not ask for or store payment information, addresses, or account credentials."
   },
   {
-    "id": "kb-prewarm-vad",
-    "text": "Q: Why and how is Silero VAD prewarmed? A: Loading the VAD model is relatively expensive, so it is loaded once at process startup instead of per session. The starter sets server.setup_fnc = prewarm, and prewarm loads silero.VAD into proc.userdata['vad']; each new session then reuses that cached VAD instance, reducing first-response latency for the very first call the worker handles.",
-    "metadata": { "category": "voice-agents", "topic": "performance" }
+    "id": "kb-comparing",
+    "text": "Q: Can it compare two products? A: You can ask about one product at a time and then ask about another, and Deal Hunter will remember what you were looking at. For a direct comparison, ask for each product's best price in turn, then ask which is cheaper. It compares only prices it actually retrieved, never estimates."
   }
 ]

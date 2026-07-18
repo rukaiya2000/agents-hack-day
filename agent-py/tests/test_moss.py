@@ -216,3 +216,236 @@ async def test_recall_facts_filters_by_user_id(stub_moss) -> None:
 
     # recall_facts also surfaces context to the frontend panel.
     assert len(room.local_participant.published) == 1
+
+
+async def test_watch_item_stores_structured_watch_and_publishes(stub_moss) -> None:
+    """watch_item writes a `kind=watch` doc and publishes the updated list."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, user_id=USER_ID)
+    # The post-write refresh reads the watch back out of Moss.
+    assistant._moss.query_result = _FakeSearchResult(
+        [
+            _FakeDoc(
+                "Watching Sony WH-1000XM5 for a price drop below 130 dollars.",
+                metadata={
+                    "user_id": USER_ID,
+                    "kind": "watch",
+                    "product": "Sony WH-1000XM5",
+                    "target_price": "130.0",
+                },
+            )
+        ]
+    )
+
+    reply = await assistant.watch_item(None, "Sony WH-1000XM5", 130)
+
+    # Stored with structured metadata so the UI can render it.
+    assert len(assistant._moss.add_docs_calls) == 1
+    _index, docs, _options = assistant._moss.add_docs_calls[0]
+    metadata = docs[0].metadata
+    assert metadata["kind"] == "watch"
+    assert metadata["product"] == "Sony WH-1000XM5"
+    assert metadata["target_price"] == "130"
+    assert metadata["user_id"] == USER_ID
+
+    # Spoken confirmation names the product and the target.
+    assert "Sony WH-1000XM5" in reply
+    assert "130" in reply
+
+    # Publishes a watchlist payload for the UI panel.
+    payload, _reliable = room.local_participant.published[-1]
+    message = json.loads(payload.decode("utf-8"))
+    assert message["type"] == "watchlist"
+    assert message["data"]["count"] == 1
+    assert message["data"]["watches"][0] == {
+        "product": "Sony WH-1000XM5",
+        "target_price": 130.0,
+    }
+
+
+async def test_watch_item_without_target_price(stub_moss) -> None:
+    """A watch with no threshold still saves and reads back with target None."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, user_id=USER_ID)
+    assistant._moss.query_result = _FakeSearchResult(
+        [
+            _FakeDoc(
+                "Watching AirPods Pro for a price drop.",
+                metadata={
+                    "user_id": USER_ID,
+                    "kind": "watch",
+                    "product": "AirPods Pro",
+                    "target_price": "",
+                },
+            )
+        ]
+    )
+
+    reply = await assistant.watch_item(None, "AirPods Pro")
+
+    assert "AirPods Pro" in reply
+    payload, _reliable = room.local_participant.published[-1]
+    message = json.loads(payload.decode("utf-8"))
+    assert message["data"]["watches"][0]["target_price"] is None
+
+
+async def test_list_watches_filters_non_watch_memories_and_dedupes(
+    stub_moss, monkeypatch
+) -> None:
+    """Only `kind=watch` docs count, and repeated products collapse to one."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, user_id=USER_ID)
+    # Keep the live price re-check offline.
+    monkeypatch.setattr(Assistant, "_current_best", _no_price)
+    assistant._moss.query_result = _FakeSearchResult(
+        [
+            _FakeDoc(
+                "Watching Sony WH-1000XM5 below 130 dollars.",
+                metadata={
+                    "kind": "watch",
+                    "product": "Sony WH-1000XM5",
+                    "target_price": "130",
+                },
+            ),
+            # A plain remembered fact must not show up as a watch.
+            _FakeDoc("My name is Sam.", metadata={"user_id": USER_ID}),
+            # Duplicate product (different casing) collapses to the first.
+            _FakeDoc(
+                "Watching sony wh-1000xm5 again.",
+                metadata={
+                    "kind": "watch",
+                    "product": "sony wh-1000xm5",
+                    "target_price": "99",
+                },
+            ),
+        ]
+    )
+
+    reply = await assistant.list_watches(None)
+
+    payload, _reliable = room.local_participant.published[-1]
+    message = json.loads(payload.decode("utf-8"))
+    assert message["data"]["count"] == 1
+    assert message["data"]["watches"][0]["product"] == "Sony WH-1000XM5"
+    assert "Sony WH-1000XM5" in reply
+
+
+async def test_list_watches_empty(stub_moss, monkeypatch) -> None:
+    """An empty watchlist reads back cleanly and still publishes."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, user_id=USER_ID)
+    assistant._moss.query_result = _FakeSearchResult([])
+
+    reply = await assistant.list_watches(None)
+
+    assert "empty" in reply.lower()
+    payload, _reliable = room.local_participant.published[-1]
+    message = json.loads(payload.decode("utf-8"))
+    assert message["type"] == "watchlist"
+    assert message["data"]["count"] == 0
+
+
+async def _no_price(self, product):
+    """Stub for `Assistant._current_best` — no live lookup in unit tests."""
+    return {}
+
+
+async def test_list_watches_attaches_current_price_and_flags_target_hit(
+    stub_moss, monkeypatch
+) -> None:
+    """A refreshed watch carries its live price, and a hit target is announced."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, user_id=USER_ID)
+    assistant._moss.query_result = _FakeSearchResult(
+        [
+            _FakeDoc(
+                "Watching Sony WH-1000XM5 below 200 dollars.",
+                metadata={
+                    "kind": "watch",
+                    "product": "Sony WH-1000XM5",
+                    "target_price": "200",
+                },
+            )
+        ]
+    )
+
+    async def fake_best(self, product):
+        return {
+            "current_price": 147.0,
+            "current_source": "Amazon",
+            "current_url": "https://example.com/xm5",
+        }
+
+    monkeypatch.setattr(Assistant, "_current_best", fake_best)
+
+    reply = await assistant.list_watches(None)
+
+    payload, _reliable = room.local_participant.published[-1]
+    message = json.loads(payload.decode("utf-8"))
+    watch = message["data"]["watches"][0]
+    assert watch["current_price"] == 147.0
+    assert watch["current_source"] == "Amazon"
+    assert watch["current_url"] == "https://example.com/xm5"
+
+    # 147 is under the 200 target, so it should be surfaced as good news.
+    assert "good news" in reply.lower()
+    assert "147" in reply
+
+
+class _FakeSession:
+    """Records `session.say()` filler lines."""
+
+    def __init__(self) -> None:
+        self.said: list[str] = []
+
+    def say(self, text):
+        self.said.append(text)
+
+
+class _FakeRunContext:
+    def __init__(self) -> None:
+        self.session = _FakeSession()
+
+
+async def test_find_deals_speaks_a_filler_before_searching(
+    stub_moss, monkeypatch
+) -> None:
+    """A slow search should not leave dead air on the call."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, user_id=USER_ID)
+    ctx = _FakeRunContext()
+
+    async def fake_find(query, **kwargs):
+        # Filler must already have been spoken by the time the search runs.
+        assert ctx.session.said, "expected a filler line before the search"
+        return agent_module_deal_result_stub()
+
+    monkeypatch.setattr("deal_hunter.finder.find_deals", fake_find, raising=False)
+    monkeypatch.setattr(
+        "deal_hunter.finder.voice_summary", lambda r: "summary", raising=False
+    )
+    # Don't spawn real background verification in a unit test.
+    monkeypatch.setattr(Assistant, "_spawn_price_verification", lambda self, r: None)
+
+    reply = await assistant.find_deals(ctx, "sony headphones")
+
+    assert reply == "summary"
+    assert ctx.session.said == ["Let me check the latest prices."]
+
+
+def agent_module_deal_result_stub():
+    """Minimal object satisfying `_publish_deal_result` (needs `as_dict`)."""
+
+    class _R:
+        def __init__(self):
+            self.deals = []
+
+        def as_dict(self):
+            return {"query": "q", "country": "us", "count": 0, "deals": []}
+
+    return _R()
+
+
+async def test_say_filler_is_safe_without_a_session() -> None:
+    """Tools stay callable (and silent) when there is no RunContext."""
+    agent_module._say_filler(None, "hello")  # must not raise

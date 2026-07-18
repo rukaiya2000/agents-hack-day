@@ -44,9 +44,9 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   isPreConnectBufferEnabled: true,
 
   logo: '/deal-hunter-logo-mark.svg',
-  accent: '#0e7178',
+  accent: '#ea580c',
   logoDark: '/deal-hunter-logo-mark.svg',
-  accentDark: '#6cbbbf',
+  accentDark: '#fb923c',
   startButtonText: 'Start voice demo',
 
   // optional: audio visualization configuration

@@ -11,8 +11,10 @@ import {
 import { Shimmer } from '@/components/ai-elements/shimmer';
 import { DealResultsPanel } from '@/components/app/deal-results-panel';
 import { MossResultsPanel } from '@/components/app/moss-results-panel';
+import { WatchlistPanel } from '@/components/app/watchlist-panel';
 import { useDealResultEvents } from '@/hooks/useDealResultEvents';
 import { useMossContextEvents } from '@/hooks/useMossContextEvents';
+import { useWatchlistEvents } from '@/hooks/useWatchlistEvents';
 import { cn } from '@/lib/shadcn/utils';
 import { TileLayout } from './tile-view';
 
@@ -188,6 +190,8 @@ export function AgentSessionView_01({
   const mossEvents = useMossContextEvents();
   // Live "Best Prices" surfaced from the agent's `deal_result` data messages.
   const dealEvents = useDealResultEvents();
+  // The user's price watchlist, from the agent's `watchlist` data messages.
+  const watches = useWatchlistEvents();
 
   const controls: AgentControlBarControls = {
     leave: true,
@@ -234,6 +238,7 @@ export function AgentSessionView_01({
       {/* Live Knowledge Matches panel (Moss retrieval results) — renders beside the
           visualizer/transcript, inside the RoomContext provider. Hidden until matches arrive. */}
       <div className="pointer-events-auto absolute top-0 right-0 bottom-[170px] z-[60] hidden w-full max-w-sm space-y-4 overflow-y-auto overscroll-contain px-4 pt-40 pb-4 md:block">
+        <WatchlistPanel watches={watches} />
         <DealResultsPanel events={dealEvents} />
         <MossResultsPanel events={mossEvents} />
       </div>

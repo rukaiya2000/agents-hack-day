@@ -13,14 +13,38 @@ means it can be unit-tested without LiveKit or Bright Data credentials — see
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .web_research import serp_search_api
+from .web_research import serp_search_api, unlock_url_api
 
 logger = logging.getLogger(__name__)
+
+# How many of the cheapest deals to confirm against their real listing page.
+DEFAULT_VERIFY_TOP_N = 2
+# Per-page ceiling, so one slow retailer can't consume the whole budget.
+# Generous because verification runs in the background, after the spoken reply:
+# retailer pages routinely take 10s+ through the Unlocker, and a premature
+# timeout just means a confirmable price silently goes unconfirmed.
+VERIFY_PAGE_TIMEOUT_SECONDS = 22.0
+# Overall ceiling for a batch of verifications.
+VERIFY_TIMEOUT_SECONDS = 30.0
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r; using %s", name, raw, default)
+        return default
+
 
 # Matches money like "$1,299.00", "$79", "USD 49.99". Group 1 is the number.
 _PRICE_RE = re.compile(
@@ -39,6 +63,9 @@ class Deal:
     price: float | None
     price_text: str | None
     snippet: str | None
+    # True once the SERP price has been confirmed on the actual listing page
+    # (via Bright Data Web Unlocker). None means "not checked".
+    verified: bool | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +75,7 @@ class Deal:
             "price": self.price,
             "price_text": self.price_text,
             "snippet": self.snippet,
+            "verified": self.verified,
         }
 
 
@@ -70,6 +98,93 @@ class DealResult:
             "count": len(self.deals),
             "deals": [d.as_dict() for d in self.deals],
         }
+
+
+def all_prices(text: str | None) -> list[float]:
+    """Every money-looking value in a block of text, as floats."""
+    if not text:
+        return []
+    values: list[float] = []
+    for match in _PRICE_RE.finditer(text):
+        try:
+            values.append(float(match.group(1).replace(",", "")))
+        except ValueError:
+            continue
+    return values
+
+
+def price_is_on_page(
+    price: float, page_text: str | None, tolerance: float = 0.01
+) -> bool:
+    """True when `price` actually appears on the fetched listing page."""
+    return any(
+        abs(candidate - price) <= tolerance for candidate in all_prices(page_text)
+    )
+
+
+async def verify_deal(deal: Deal, *, max_chars: int = 8000) -> Deal:
+    """Confirm a deal's SERP price against the real listing page.
+
+    Uses Bright Data's Web Unlocker to read the page, then checks whether the
+    price we parsed from the search snippet actually appears there. We only
+    *confirm or deny* — deliberately never rewriting the price from a heuristic
+    scrape, since guessing the wrong number on a page full of prices (shipping,
+    accessories, "was" prices) is worse than admitting uncertainty.
+
+    Best-effort: any failure leaves `verified` as None ("not checked").
+    """
+    if not deal.url or deal.price is None:
+        return deal
+    try:
+        # Per-page timeout: a slow retailer fails on its own rather than
+        # cancelling the sibling verifications running alongside it.
+        page = await asyncio.wait_for(
+            unlock_url_api(deal.url, max_chars=max_chars),
+            timeout=VERIFY_PAGE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.info("Price verification timed out for %s", deal.url)
+        return deal
+    except Exception:
+        logger.warning("Price verification failed for %s", deal.url, exc_info=True)
+        return deal
+
+    deal.verified = price_is_on_page(deal.price, page.get("content"))
+    return deal
+
+
+async def verify_top_deals(
+    result: DealResult,
+    *,
+    top_n: int = DEFAULT_VERIFY_TOP_N,
+    timeout: float = VERIFY_TIMEOUT_SECONDS,
+) -> DealResult:
+    """Confirm the cheapest `top_n` priced deals against their listing pages.
+
+    Mutates and returns `result`. Safe to run in the background after the voice
+    reply has already gone out — verification is slow (seconds per page), so
+    blocking a turn on it makes the agent feel broken.
+    """
+    candidates = [d for d in result.deals if d.price is not None and d.url][:top_n]
+    if not candidates:
+        return result
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                *(verify_deal(d) for d in candidates), return_exceptions=True
+            ),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Price verification batch timed out after %ss", timeout)
+
+    logger.info(
+        "Verified %d/%d candidate deals",
+        sum(1 for d in candidates if d.verified is not None),
+        len(candidates),
+    )
+    return result
 
 
 def _extract_price(*texts: str | None) -> tuple[float | None, str | None]:
@@ -100,9 +215,7 @@ def deals_from_serp(query: str, country: str, serp: dict[str, Any]) -> DealResul
         title = (item.get("title") or "").strip()
         if not title:
             continue
-        price, price_text = _extract_price(
-            item.get("title"), item.get("description")
-        )
+        price, price_text = _extract_price(item.get("title"), item.get("description"))
         result.deals.append(
             Deal(
                 title=title,
@@ -115,7 +228,9 @@ def deals_from_serp(query: str, country: str, serp: dict[str, Any]) -> DealResul
         )
 
     # Cheapest first; unpriced results sink to the bottom but are retained.
-    result.deals.sort(key=lambda d: (d.price is None, d.price if d.price is not None else 0.0))
+    result.deals.sort(
+        key=lambda d: (d.price is None, d.price if d.price is not None else 0.0)
+    )
     return result
 
 
@@ -124,6 +239,7 @@ async def find_deals(
     *,
     country: str | None = None,
     max_results: int = 8,
+    verify_top: int | None = None,
 ) -> DealResult:
     """Search live web data for a product and return price-ranked deals.
 
@@ -131,19 +247,29 @@ async def find_deals(
         query: A shopping query, e.g. "cheapest RTX 4090" or "Sony WH-1000XM5".
         country: ISO country code for pricing/locale (defaults to BRIGHT_DATA_COUNTRY).
         max_results: Max SERP results to consider.
+        verify_top: How many of the cheapest deals to confirm against their real
+            listing page. Defaults to DEAL_VERIFY_TOP_N (0 = off), because
+            opening pages costs seconds and the voice reply should not wait.
+            The agent verifies in the background instead, via `verify_top_deals`.
     """
     # Bias the query toward buyable listings with prices.
     search_query = f"{query} price buy"
-    serp = await serp_search_api(
-        search_query, country=country, max_results=max_results
-    )
+    serp = await serp_search_api(search_query, country=country, max_results=max_results)
     country_used = serp.get("country", country or "us")
     result = deals_from_serp(query, country_used, serp)
+
+    if verify_top is None:
+        verify_top = _env_int("DEAL_VERIFY_TOP_N", 0)
+
+    if verify_top > 0:
+        await verify_top_deals(result, top_n=verify_top)
+
     logger.info(
-        "Deal Hunter: query=%r found=%d priced=%d",
+        "Deal Hunter: query=%r found=%d priced=%d verified=%d",
         query,
         len(result.deals),
         sum(1 for d in result.deals if d.price is not None),
+        sum(1 for d in result.deals if d.verified),
     )
     return result
 
@@ -183,8 +309,15 @@ def voice_summary(result: DealResult, top_n: int = 3) -> str:
 
     best = priced[0]
     best_source = f" at {best.source}" if best.source else ""
+    # Only claim confirmation when we actually opened the listing page.
+    confirmation = ""
+    if best.verified is True:
+        confirmation = " I confirmed that on the listing page."
+    elif best.verified is False:
+        confirmation = " I couldn't confirm that on the page, so double-check it."
     lines = [
-        f"The best price I found for {result.query} is {_spell_price(best)}{best_source}."
+        f"The best price I found for {result.query} is "
+        f"{_spell_price(best)}{best_source}.{confirmation}"
     ]
     others = priced[1:top_n]
     if others:

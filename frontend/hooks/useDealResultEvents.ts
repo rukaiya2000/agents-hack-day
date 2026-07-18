@@ -11,6 +11,8 @@ export type Deal = {
   price?: number | null;
   priceText?: string | null;
   snippet?: string | null;
+  /** true = price confirmed on the listing page, false = not found, null = unchecked */
+  verified?: boolean | null;
 };
 
 export type DealResultEvent = {
@@ -52,6 +54,7 @@ function parsePayload(payload: Uint8Array): DealResultEvent | null {
           price: typeof d.price === 'number' ? d.price : null,
           priceText: typeof d.price_text === 'string' ? d.price_text : null,
           snippet: typeof d.snippet === 'string' ? d.snippet : null,
+          verified: typeof d.verified === 'boolean' ? d.verified : null,
         };
       });
 

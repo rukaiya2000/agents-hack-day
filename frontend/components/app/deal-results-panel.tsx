@@ -1,6 +1,16 @@
 import * as React from 'react';
+import { ArrowUpRight, BadgeCheck } from 'lucide-react';
 import type { Deal, DealResultEvent } from '@/hooks/useDealResultEvents';
 import { cn } from '@/lib/shadcn/utils';
+
+function hostname(url?: string | null): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return null;
+  }
+}
 
 interface DealResultsPanelProps extends React.HTMLAttributes<HTMLDivElement> {
   events: DealResultEvent[];
@@ -48,39 +58,81 @@ export function DealResultsPanel({
                 {ranked.length === 0 ? (
                   <li className="text-muted-foreground italic">No listings found.</li>
                 ) : (
-                  ranked.map((deal, index) => (
-                    <li
-                      key={`${id}-${index}`}
-                      className="border-border/60 flex items-start gap-2 rounded-md border p-2"
-                    >
-                      <span
-                        className={cn(
-                          'mt-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded px-1 text-xs font-semibold',
-                          index === 0
-                            ? 'bg-primary text-primary-foreground'
-                            : 'bg-muted text-muted-foreground'
-                        )}
-                      >
-                        {index + 1}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-baseline justify-between gap-2">
-                          <span className="text-foreground font-semibold">{formatPrice(deal)}</span>
-                          {index === 0 && (
-                            <span className="text-primary text-xs font-medium">Best price</span>
+                  ranked.map((deal, index) => {
+                    const label = deal.source ?? hostname(deal.url);
+                    const rowContent = (
+                      <>
+                        <span
+                          className={cn(
+                            'mt-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded px-1 text-xs font-semibold',
+                            index === 0
+                              ? 'bg-primary text-primary-foreground'
+                              : 'bg-muted text-muted-foreground'
+                          )}
+                        >
+                          {index + 1}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-baseline justify-between gap-2">
+                            <span className="flex items-baseline gap-1.5">
+                              <span className="text-foreground font-semibold">
+                                {formatPrice(deal)}
+                              </span>
+                              {deal.verified === true && (
+                                <span
+                                  title="Price confirmed on the listing page"
+                                  className="text-primary inline-flex items-center gap-0.5 text-[10px] font-medium"
+                                >
+                                  <BadgeCheck className="size-3" />
+                                  verified
+                                </span>
+                              )}
+                              {deal.verified === false && (
+                                <span
+                                  title="This price was not found on the listing page — double-check it"
+                                  className="text-muted-foreground/70 text-[10px]"
+                                >
+                                  unconfirmed
+                                </span>
+                              )}
+                            </span>
+                            {index === 0 && (
+                              <span className="text-primary text-xs font-medium">Best price</span>
+                            )}
+                          </span>
+                          <span className="text-muted-foreground block truncate leading-snug">
+                            {deal.title}
+                          </span>
+                          {label && (
+                            <span className="text-primary/90 mt-0.5 flex items-center gap-0.5 text-xs">
+                              {label}
+                              {deal.url && <ArrowUpRight className="size-3" />}
+                            </span>
                           )}
                         </span>
-                        <span className="text-muted-foreground block truncate leading-snug">
-                          {deal.title}
-                        </span>
-                        {deal.source && (
-                          <span className="text-muted-foreground/80 block text-xs">
-                            {deal.source}
-                          </span>
+                      </>
+                    );
+
+                    return (
+                      <li key={`${id}-${index}`}>
+                        {deal.url ? (
+                          <a
+                            href={deal.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={`Open listing: ${deal.title}`}
+                            className="border-border/60 hover:border-primary/50 hover:bg-muted/40 flex items-start gap-2 rounded-md border p-2 transition-colors"
+                          >
+                            {rowContent}
+                          </a>
+                        ) : (
+                          <div className="border-border/60 flex items-start gap-2 rounded-md border p-2">
+                            {rowContent}
+                          </div>
                         )}
-                      </span>
-                    </li>
-                  ))
+                      </li>
+                    );
+                  })
                 )}
               </ol>
             </details>
