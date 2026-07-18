@@ -1,0 +1,103 @@
+/* ============================================================
+   Medical Affairs Copilot — Color Tokens
+   ------------------------------------------------------------
+   A restrained medical–scientific palette. Cool clinical
+   off-white canvas, white surfaces, charcoal ink, deep teal
+   primary, and four calm semantic accents (evidence / compliance
+   / risk / validated). Color carries meaning here — it is never
+   decorative. Most of the interface is neutral; accents are used
+   sparingly to signal state.
+   ============================================================ */
+
+:root {
+  /* ---- Neutrals (cool slate) ---- */
+  --slate-950: #131a1c; /* charcoal ink */
+  --slate-800: #232f33;
+  --slate-700: #3a484c;
+  --slate-500: #647379; /* secondary text */
+  --slate-400: #8b989e; /* tertiary text */
+  --slate-300: #c4ced2; /* strong border */
+  --slate-200: #e0e6e8; /* subtle border */
+  --slate-100: #edf1f2; /* sunken surface */
+  --slate-50:  #f4f7f8; /* canvas */
+  --white:     #ffffff;
+
+  /* ---- Teal — primary accent ---- */
+  --teal-50:  #e4f2f2;
+  --teal-100: #c3e3e4;
+  --teal-300: #6cbbbf;
+  --teal-500: #128a92;
+  --teal-600: #0e7178; /* primary */
+  --teal-700: #0a565c; /* hover / pressed */
+
+  /* ---- Indigo — evidence accent ---- */
+  --indigo-50:  #eceefb;
+  --indigo-500: #4156c8;
+  --indigo-600: #36469f;
+
+  /* ---- Amber — compliance accent ---- */
+  --amber-50:  #fbf2df;
+  --amber-500: #c28a1e;
+  --amber-600: #946410;
+
+  /* ---- Red — risk accent ---- */
+  --red-50:  #f9eae6;
+  --red-500: #c24a33;
+  --red-600: #9e3724;
+
+  /* ---- Green — validated / safe accent ---- */
+  --green-50:  #e6f2ea;
+  --green-500: #2e8a5b;
+  --green-600: #1f6b45;
+
+  /* ============================================================
+     Semantic aliases — reference these in product code
+     ============================================================ */
+
+  /* Text */
+  --text-primary:   var(--slate-950);
+  --text-secondary: var(--slate-500);
+  --text-tertiary:  var(--slate-400);
+  --text-on-accent: var(--white);
+  --text-accent:    var(--teal-700);
+
+  /* Surfaces */
+  --surface-canvas: var(--slate-50);
+  --surface-card:   var(--white);
+  --surface-sunken: var(--slate-100);
+  --surface-inset:  #fbfcfc;
+
+  /* Borders */
+  --border-subtle: var(--slate-200);
+  --border-strong: var(--slate-300);
+  --border-accent: var(--teal-600);
+
+  /* Primary accent */
+  --accent:        var(--teal-600);
+  --accent-hover:  var(--teal-700);
+  --accent-tint:   var(--teal-50);
+  --accent-tint-2: var(--teal-100);
+
+  /* Semantic — evidence */
+  --evidence:      var(--indigo-500);
+  --evidence-ink:  var(--indigo-600);
+  --evidence-tint: var(--indigo-50);
+
+  /* Semantic — compliance */
+  --compliance:      var(--amber-500);
+  --compliance-ink:  var(--amber-600);
+  --compliance-tint: var(--amber-50);
+
+  /* Semantic — risk */
+  --risk:      var(--red-500);
+  --risk-ink:  var(--red-600);
+  --risk-tint: var(--red-50);
+
+  /* Semantic — validated / safe */
+  --safe:      var(--green-500);
+  --safe-ink:  var(--green-600);
+  --safe-tint: var(--green-50);
+
+  /* Focus ring */
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--teal-600) 28%, transparent);
+}

@@ -1,0 +1,44 @@
+<!-- @dsCard group="Colors" viewport="700x210" name="Semantic accents" subtitle="Evidence · Compliance · Risk · Validated. Color = meaning, never decoration." -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin: 0; padding: 22px; background: var(--surface-card); }
+  .row { display: flex; gap: 12px; }
+  .sw { flex: 1; }
+  .pair { display: flex; height: 64px; border-radius: var(--radius-md); overflow: hidden; border: 1px solid rgba(19,26,28,.08); }
+  .pair .tint { width: 38%; }
+  .pair .solid { flex: 1; }
+  .lab { display: flex; align-items: center; gap: 6px; margin-top: 9px; }
+  .dot { width: 9px; height: 9px; border-radius: 999px; }
+  .name { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
+  .val { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--text-tertiary); margin-top: 3px; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="sw">
+      <div class="pair"><div class="tint" style="background:var(--evidence-tint)"></div><div class="solid" style="background:var(--evidence)"></div></div>
+      <div class="lab"><span class="dot" style="background:var(--evidence)"></span><span class="name">Evidence</span></div>
+      <div class="val">--evidence · indigo</div>
+    </div>
+    <div class="sw">
+      <div class="pair"><div class="tint" style="background:var(--compliance-tint)"></div><div class="solid" style="background:var(--compliance)"></div></div>
+      <div class="lab"><span class="dot" style="background:var(--compliance)"></span><span class="name">Compliance</span></div>
+      <div class="val">--compliance · amber</div>
+    </div>
+    <div class="sw">
+      <div class="pair"><div class="tint" style="background:var(--risk-tint)"></div><div class="solid" style="background:var(--risk)"></div></div>
+      <div class="lab"><span class="dot" style="background:var(--risk)"></span><span class="name">Risk</span></div>
+      <div class="val">--risk · muted red</div>
+    </div>
+    <div class="sw">
+      <div class="pair"><div class="tint" style="background:var(--safe-tint)"></div><div class="solid" style="background:var(--safe)"></div></div>
+      <div class="lab"><span class="dot" style="background:var(--safe)"></span><span class="name">Validated</span></div>
+      <div class="val">--safe · green</div>
+    </div>
+  </div>
+</body>
+</html>

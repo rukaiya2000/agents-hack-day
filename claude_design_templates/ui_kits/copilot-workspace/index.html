@@ -1,0 +1,61 @@
+<!-- @dsCard group="Copilot Workspace" viewport="1440x900" name="Cockpit Workspace" subtitle="The three-panel cockpit — Protocol Intelligence · Copilot · Ranked Experts." -->
+<!-- @startingPoint section="Copilot Workspace" subtitle="Protocol-aware three-panel cockpit workspace" viewport="1440x900" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Medical Affairs Copilot — Workspace</title>
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<!-- Fast path: the compiled DS bundle (present in the Design System tab) -->
+<script src="../../_ds_bundle.js"></script>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--surface-canvas); overflow: hidden; }
+  #root { position: fixed; inset: 0; }
+  #boot { position: fixed; inset: 0; display: grid; place-items: center; color: var(--text-tertiary); font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+</style>
+</head>
+<body>
+<div id="root"><div id="boot">Loading workspace…</div></div>
+<script>
+// Resolve the design-system namespace. Fast path = compiled bundle; fallback =
+// build it from component source (keeps the kit rendering in any preview).
+(async () => {
+  const NS = 'MedicalAffairsCopilotDesignSystem_2d0005';
+  const transpile = (code) => Babel.transform(code, { presets: ['react'] }).code;
+  const fetchText = async (p) => (await fetch(p)).text();
+
+  if (window[NS] && Object.keys(window[NS]).length) {
+    window.DS = window[NS];
+  } else {
+    const comps = [
+      'Button', 'Badge', 'Tag', 'Avatar', 'Card',
+    ].map((n) => `../../components/core/${n}.jsx`)
+      .concat(['ScoreBar', 'Citation'].map((n) => `../../components/evidence/${n}.jsx`))
+      .concat(['KolCard', 'CompliancePanel', 'VoiceControl'].map((n) => `../../components/copilot/${n}.jsx`));
+    let blob = '';
+    for (const p of comps) {
+      let c = await fetchText(p);
+      c = c.replace(/^\s*import\s+.*?;?\s*$/gm, '').replace(/export\s+function/g, 'function');
+      blob += '\n' + c + '\n';
+    }
+    const names = [...new Set([...blob.matchAll(/function\s+([A-Z][A-Za-z0-9]*)\s*\(/g)].map((m) => m[1]))];
+    blob += '\nwindow.DS = Object.assign(window.DS || {}, {' + names.join(',') + '});';
+    new Function('React', transpile(blob))(window.React);
+  }
+
+  // Data + kit files (single shared scope) + render.
+  new Function(await fetchText('data.js'))();
+  const kit = ['TopBar.jsx', 'ProtocolPanel.jsx', 'BriefDocument.jsx', 'EvidenceDrawer.jsx', 'CopilotConversation.jsx', 'KolRail.jsx', 'App.jsx'];
+  let kblob = '';
+  for (const f of kit) kblob += '\n' + await fetchText(f) + '\n';
+  kblob += '\nReactDOM.createRoot(document.getElementById("root")).render(React.createElement(window.App));';
+  new Function('React', 'ReactDOM', transpile(kblob))(window.React, window.ReactDOM);
+})();
+</script>
+</body>
+</html>
