@@ -42,7 +42,6 @@ MEMORY_INDEX = os.getenv("MOSS_MEMORY_INDEX_NAME", "memory")
 # running `uv run src/agent.py console`). The frontend provides a real
 # per-browser user_id via agent dispatch metadata.
 DEFAULT_USER_ID = "user_1"
-DEFAULT_PROTOCOL_ID = "nct04816669-bnt162b2"
 MOSS_NOT_CONFIGURED_MESSAGE = (
     "Moss is not configured yet. Add MOSS_PROJECT_ID and MOSS_PROJECT_KEY "
     "to agent-py/.env.local to enable knowledge search and memory."
@@ -154,74 +153,6 @@ def _voice_noise_cancellation():
     return ai_coustics.audio_enhancement(model=ai_coustics.EnhancerModel.QUAIL_VF_S)
 
 
-def _display_value(value: Any) -> str | None:
-    if isinstance(value, str):
-        normalized = value.strip()
-        return normalized or None
-    if isinstance(value, list):
-        parts = [_display_value(item) for item in value]
-        joined = ", ".join(part for part in parts if part)
-        return joined or None
-    if value is None:
-        return None
-    return str(value)
-
-
-def _format_protocol_context(
-    protocol_id: str, protocol_context: dict[str, Any] | None
-) -> str:
-    context = protocol_context if isinstance(protocol_context, dict) else {}
-    fields = [
-        ("Protocol ID", protocol_id),
-        ("NCT ID", context.get("nct")),
-        ("Title", context.get("title")),
-        ("Sponsor", context.get("sponsor")),
-        ("Phase", context.get("phase")),
-        ("Indication", context.get("indication")),
-        ("Intervention", context.get("intervention")),
-        ("Population", context.get("patientPopulation") or context.get("population")),
-        ("Geography", context.get("geography")),
-        ("Relevant specialties", context.get("relevantSpecialties")),
-        ("Enrollment", context.get("enrollment")),
-        ("Processing status", context.get("status")),
-    ]
-    lines = [
-        f"- {label}: {value}" for label, raw in fields if (value := _display_value(raw))
-    ]
-    if not lines:
-        lines = [f"- Protocol ID: {protocol_id}"]
-
-    return textwrap.dedent(
-        f"""\
-
-        # Current protocol context
-
-        This LiveKit room is scoped to the following active protocol. Treat it
-        as the current protocol unless the user explicitly switches context.
-        Use this protocol context when answering conversational setup questions,
-        and the `answer_kol_question` tool will receive this same protocol ID
-        for retrieval and ranking.
-
-        {chr(10).join(lines)}
-        """
-    )
-
-
-def _protocol_greeting_label(
-    protocol_id: str, protocol_context: dict[str, Any] | None
-) -> str:
-    context = protocol_context if isinstance(protocol_context, dict) else {}
-    title = _display_value(context.get("title"))
-    indication = _display_value(context.get("indication"))
-    if title and indication:
-        return f"{protocol_id}, {title}, in {indication}"
-    if title:
-        return f"{protocol_id}, {title}"
-    if indication:
-        return f"{protocol_id}, in {indication}"
-    return protocol_id
-
-
 class Assistant(Agent):
     """Voice agent that wires Moss retrieval + per-user memory into LiveKit."""
 
@@ -230,8 +161,6 @@ class Assistant(Agent):
         *,
         room=None,
         user_id: str = DEFAULT_USER_ID,
-        protocol_id: str = DEFAULT_PROTOCOL_ID,
-        protocol_context: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             # The LLM (the agent's brain) runs on LiveKit Inference — no
@@ -305,8 +234,6 @@ class Assistant(Agent):
         )
         self._room = room
         self._user_id = user_id
-        self._protocol_id = protocol_id
-        self._protocol_context = protocol_context or {}
         moss_project_id = os.getenv("MOSS_PROJECT_ID")
         moss_project_key = os.getenv("MOSS_PROJECT_KEY")
         if moss_project_id and moss_project_key:
@@ -407,8 +334,8 @@ class Assistant(Agent):
             query: The product the user wants to shop for, e.g.
                 "Sony WH-1000XM5 headphones" or "cheapest RTX 4090".
         """
-        from kol_copilot.deal_hunter import find_deals as run_find_deals
-        from kol_copilot.deal_hunter import voice_summary
+        from deal_hunter.finder import find_deals as run_find_deals
+        from deal_hunter.finder import voice_summary
 
         started = time.perf_counter()
         result = await run_find_deals(query)
@@ -533,16 +460,10 @@ async def my_agent(ctx: JobContext):
     # back to DEFAULT_USER_ID. Parsed before ctx.connect() to stay off the
     # connection critical path.
     user_id = DEFAULT_USER_ID
-    protocol_id = DEFAULT_PROTOCOL_ID
-    protocol_context: dict[str, Any] | None = None
     if ctx.job.metadata:
         try:
             meta = json.loads(ctx.job.metadata)
             user_id = meta.get("user_id", DEFAULT_USER_ID)
-            protocol_id = meta.get("protocol_id", DEFAULT_PROTOCOL_ID)
-            raw_protocol_context = meta.get("protocol_context")
-            if isinstance(raw_protocol_context, dict):
-                protocol_context = raw_protocol_context
         except json.JSONDecodeError:
             logger.warning("ctx.job.metadata was not valid JSON; using default user_id")
 
@@ -565,8 +486,6 @@ async def my_agent(ctx: JobContext):
         agent=Assistant(
             room=ctx.room,
             user_id=user_id,
-            protocol_id=protocol_id,
-            protocol_context=protocol_context,
         ),
         room=ctx.room,
         room_options=room_io.RoomOptions(

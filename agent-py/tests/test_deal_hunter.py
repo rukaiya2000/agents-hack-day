@@ -8,8 +8,8 @@ verified separately when the agent runs.
 
 import pytest
 
-from kol_copilot import deal_hunter
-from kol_copilot.deal_hunter import (
+from deal_hunter import finder
+from deal_hunter.finder import (
     Deal,
     DealResult,
     deals_from_serp,
@@ -64,10 +64,10 @@ def test_deals_from_serp_extracts_and_ranks_by_price():
 
 
 def test_extract_price_handles_formats():
-    assert deal_hunter._extract_price("Now $1,299.00")[0] == pytest.approx(1299.00)
-    assert deal_hunter._extract_price("USD 49.99")[0] == pytest.approx(49.99)
-    assert deal_hunter._extract_price("just $79")[0] == pytest.approx(79.0)
-    assert deal_hunter._extract_price("no price here") == (None, None)
+    assert finder._extract_price("Now $1,299.00")[0] == pytest.approx(1299.00)
+    assert finder._extract_price("USD 49.99")[0] == pytest.approx(49.99)
+    assert finder._extract_price("just $79")[0] == pytest.approx(79.0)
+    assert finder._extract_price("no price here") == (None, None)
 
 
 @pytest.mark.asyncio
@@ -79,7 +79,7 @@ async def test_find_deals_uses_serp_and_returns_ranked(monkeypatch):
         captured["max_results"] = max_results
         return SAMPLE_SERP
 
-    monkeypatch.setattr(deal_hunter, "serp_search_api", fake_serp)
+    monkeypatch.setattr(finder, "serp_search_api", fake_serp)
 
     result = await find_deals("Sony WH-1000XM5", max_results=8)
 

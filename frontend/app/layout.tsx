@@ -57,7 +57,7 @@ export default async function RootLayout({ children }: RootLayoutProps) {
         {styles && <style>{styles}</style>}
         <title>{pageTitle}</title>
         <meta name="description" content={pageDescription} />
-        <link rel="icon" href="/kol-copilot-logo-mark.svg" type="image/svg+xml" />
+        <link rel="icon" href="/deal-hunter-logo-mark.svg" type="image/svg+xml" />
       </head>
       <body className="overflow-x-hidden">
         <ThemeProvider

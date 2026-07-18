@@ -81,12 +81,10 @@ async def brightdata_serp_search(
     country: str | None = None,
     max_results: int = 10,
 ) -> dict[str, Any]:
-    """Search Google through Bright Data SERP API for public KOL evidence.
+    """Search Google through Bright Data SERP API for live product listings.
 
-    Use this for source discovery across ClinicalTrials.gov, PubMed, congress
-    pages, guideline pages, institution bios, and transparency records. Query
-    public scientific relevance only; never search prescribing volume or sales
-    potential.
+    Use this to discover current retailer listings and prices for a shopping
+    query across the public web.
     """
 
     return await serp_search_api(query, country=country, max_results=max_results)

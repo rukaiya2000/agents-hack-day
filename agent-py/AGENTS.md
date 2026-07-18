@@ -8,7 +8,7 @@ The following is a guide for working with this project.
 
 This Python project uses the `uv` package manager. You should always use `uv` to install dependencies, run the agent, and run tests.
 
-All app-level code is in the `src/` directory. In general, simple agents can be constructed with a single `agent.py` file. Additional files can be added, but you must retain `agent.py` as the entrypoint (see the associated Dockerfile for how this is deployed).
+All app-level code is in the `src/` directory. In general, simple agents can be constructed with a single `agent.py` file. Additional files can be added, but you must retain `agent.py` as the entrypoint. Deal Hunter's shopping logic lives in the `src/deal_hunter/` package (`finder.py` for price search, `web_research.py` for the Bright Data helpers).
 
 Be sure to maintain code formatting. You can use the ruff formatter/linter as needed: `uv run ruff format` and `uv run ruff check`.
 
@@ -29,8 +29,9 @@ The agent reads and writes two Moss indexes (names overridable via `MOSS_INDEX_N
 
 ### Tools
 
-The `Assistant` (in `src/agent.py`) exposes three `@function_tool()` methods:
+The `Assistant` (in `src/agent.py`) exposes four `@function_tool()` methods:
 
+- **`find_deals(query)`** — searches live product listings via Bright Data (`deal_hunter.finder`), returns a spoken cheapest-first summary, and publishes a `deal_result` data message to the room for the frontend "Best Prices" cards.
 - **`search_knowledge(query)`** — queries the `knowledge` index (RAG), returns the joined snippet text, and publishes a `moss_context` data message to the room for the frontend context panel.
 - **`remember_fact(fact)`** — upserts a document into the `memory` index via `add_docs`, tagged with the current user's `user_id` metadata.
 - **`recall_facts(query)`** — queries the `memory` index filtered to the current user (`filter={"field": "user_id", "condition": {"$eq": <user_id>}}`) and publishes a `moss_context` message.

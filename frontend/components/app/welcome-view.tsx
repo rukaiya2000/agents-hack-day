@@ -2,9 +2,9 @@
 
 import type { ComponentProps, ReactNode } from 'react';
 import { Bell, CheckCircle2, Mic, Play, Search, Tag, TrendingDown } from 'lucide-react';
-import styles from './medical-affairs-landing.module.css';
+import styles from './landing.module.css';
 
-const LOGO_SRC = '/kol-copilot-logo-mark.svg';
+const LOGO_SRC = '/deal-hunter-logo-mark.svg';
 
 interface WelcomeViewProps {
   startButtonText: string;
@@ -50,23 +50,23 @@ function HeroVisual() {
       </div>
       <div className="device__body">
         <VoiceControlPreview transcript="Find me the cheapest Sony WH-1000XM5" />
-        <div className="kol-card">
-          <div className="kol-card__header">
-            <span className="kol-card__rank">01</span>
+        <div className="deal-card">
+          <div className="deal-card__header">
+            <span className="deal-card__rank">01</span>
             <span className="avatar" aria-hidden="true">
               <Tag size={16} />
             </span>
-            <div className="kol-card__identity">
-              <div className="kol-card__name">Sony WH-1000XM5</div>
-              <div className="kol-card__inst">Amazon · in stock</div>
+            <div className="deal-card__identity">
+              <div className="deal-card__name">Sony WH-1000XM5</div>
+              <div className="deal-card__inst">Amazon · in stock</div>
             </div>
-            <div className="kol-card__score">
-              <div className="kol-card__score-value">$147</div>
-              <div className="kol-card__score-label">best price</div>
+            <div className="deal-card__score">
+              <div className="deal-card__score-value">$147</div>
+              <div className="deal-card__score-label">best price</div>
             </div>
           </div>
-          <div className="kol-card__meta-row">
-            <span className="kol-card__meta">
+          <div className="deal-card__meta-row">
+            <span className="deal-card__meta">
               Wireless noise-cancelling <span> · free shipping</span>
             </span>
             <span className="badge badge--safe">Best price</span>
@@ -85,10 +85,10 @@ function HeroVisual() {
               <span>Target 248</span>
             </div>
           </div>
-          <p className="kol-card__rationale">
+          <p className="deal-card__rationale">
             Lowest live price found across 8 retailers — about 30 dollars under the typical listing.
           </p>
-          <div className="kol-card__footer">
+          <div className="deal-card__footer">
             <span className="citation-count">8 retailers checked</span>
             <span style={{ flex: 1 }} />
             <span className="mini-action mini-action--ghost">View listing</span>

@@ -43,9 +43,9 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   supportsScreenShare: true,
   isPreConnectBufferEnabled: true,
 
-  logo: '/kol-copilot-logo-mark.svg',
+  logo: '/deal-hunter-logo-mark.svg',
   accent: '#0e7178',
-  logoDark: '/kol-copilot-logo-mark.svg',
+  logoDark: '/deal-hunter-logo-mark.svg',
   accentDark: '#6cbbbf',
   startButtonText: 'Start voice demo',
 
