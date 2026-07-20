@@ -28,6 +28,10 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 
+# ---- Local data (watchlist + price history) ----
+agent-py/data/
+*.db
+
 # ---- Misc ----
 .DS_Store
 *.pem

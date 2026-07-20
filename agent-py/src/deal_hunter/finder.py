@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .structured import extract_offers, price_matches_offers
 from .web_research import serp_search_api, unlock_url_api
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,10 @@ class Deal:
     # True once the SERP price has been confirmed on the actual listing page
     # (via Bright Data Web Unlocker). None means "not checked".
     verified: bool | None = None
+    # Read from the listing's structured data during verification, when it has
+    # any: "in stock"/"out of stock", "new"/"refurbished"/"used".
+    availability: str | None = None
+    condition: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +81,8 @@ class Deal:
             "price_text": self.price_text,
             "snippet": self.snippet,
             "verified": self.verified,
+            "availability": self.availability,
+            "condition": self.condition,
         }
 
 
@@ -122,14 +129,20 @@ def price_is_on_page(
     )
 
 
-async def verify_deal(deal: Deal, *, max_chars: int = 8000) -> Deal:
+async def verify_deal(deal: Deal, *, max_chars: int = 30000) -> Deal:
     """Confirm a deal's SERP price against the real listing page.
 
-    Uses Bright Data's Web Unlocker to read the page, then checks whether the
-    price we parsed from the search snippet actually appears there. We only
-    *confirm or deny* — deliberately never rewriting the price from a heuristic
-    scrape, since guessing the wrong number on a page full of prices (shipping,
-    accessories, "was" prices) is worse than admitting uncertainty.
+    Two tiers, strongest first:
+
+    1. schema.org JSON-LD. Retailers publish the price as an exact field, so
+       this is a real comparison rather than a guess.
+    2. Text search, only when the page ships no structured data. This is weak —
+       any page with enough prices on it will match something — so it is the
+       fallback, not the default.
+
+    We only *confirm or deny*, deliberately never rewriting the price from a
+    heuristic scrape: guessing the wrong number on a page full of prices
+    (shipping, accessories, "was" prices) is worse than admitting uncertainty.
 
     Best-effort: any failure leaves `verified` as None ("not checked").
     """
@@ -139,7 +152,7 @@ async def verify_deal(deal: Deal, *, max_chars: int = 8000) -> Deal:
         # Per-page timeout: a slow retailer fails on its own rather than
         # cancelling the sibling verifications running alongside it.
         page = await asyncio.wait_for(
-            unlock_url_api(deal.url, max_chars=max_chars),
+            unlock_url_api(deal.url, max_chars=max_chars, raw_html=True),
             timeout=VERIFY_PAGE_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -149,7 +162,20 @@ async def verify_deal(deal: Deal, *, max_chars: int = 8000) -> Deal:
         logger.warning("Price verification failed for %s", deal.url, exc_info=True)
         return deal
 
-    deal.verified = price_is_on_page(deal.price, page.get("content"))
+    content = page.get("content")
+    offers = extract_offers(content)
+    structured = price_matches_offers(deal.price, offers)
+    if structured is not None:
+        deal.verified = structured
+        # Carry through what the page actually declares, so the agent can warn
+        # about a refurb or an out-of-stock "deal" instead of just a price.
+        best = next((o for o in offers if o.price == deal.price), offers[0])
+        deal.availability = best.availability
+        deal.condition = best.condition
+        logger.info("Verified %s from structured data: %s", deal.url, deal.verified)
+        return deal
+
+    deal.verified = price_is_on_page(deal.price, content)
     return deal
 
 

@@ -15,6 +15,11 @@ function hostname(url?: string | null): string | null {
 interface DealResultsPanelProps extends React.HTMLAttributes<HTMLDivElement> {
   events: DealResultEvent[];
   hidden?: boolean;
+  /**
+   * Notified when the user clicks a listing, so the agent knows what "this
+   * one" refers to. Fires alongside — never instead of — opening the link.
+   */
+  onDealSelect?: (deal: Deal) => void;
 }
 
 function formatPrice(deal: Deal): string {
@@ -27,6 +32,7 @@ function formatPrice(deal: Deal): string {
 export function DealResultsPanel({
   events,
   hidden = false,
+  onDealSelect,
   className,
   ...props
 }: DealResultsPanelProps) {
@@ -121,10 +127,22 @@ export function DealResultsPanel({
                             target="_blank"
                             rel="noopener noreferrer"
                             title={`Open listing: ${deal.title}`}
+                            onClick={() => onDealSelect?.(deal)}
                             className="border-border/60 hover:border-primary/50 hover:bg-muted/40 flex items-start gap-2 rounded-md border p-2 transition-colors"
                           >
                             {rowContent}
                           </a>
+                        ) : onDealSelect ? (
+                          // No link to open, but selecting it still lets the
+                          // user say "watch this one" about it.
+                          <button
+                            type="button"
+                            title={`Select listing: ${deal.title}`}
+                            onClick={() => onDealSelect(deal)}
+                            className="border-border/60 hover:border-primary/50 hover:bg-muted/40 flex w-full items-start gap-2 rounded-md border p-2 text-left transition-colors"
+                          >
+                            {rowContent}
+                          </button>
                         ) : (
                           <div className="border-border/60 flex items-start gap-2 rounded-md border p-2">
                             {rowContent}

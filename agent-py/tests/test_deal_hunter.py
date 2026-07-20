@@ -144,7 +144,7 @@ async def test_verify_deal_confirms_matching_page_price(monkeypatch):
         "XM5", "https://shop.example/xm5", "ShopExample", 147.26, "$147.26", None
     )
 
-    async def fake_unlock(url, country=None, max_chars=16000):
+    async def fake_unlock(url, country=None, max_chars=16000, raw_html=False):
         return {"content": "Sony WH-1000XM5 — $147.26 today. Free shipping."}
 
     monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
@@ -160,7 +160,7 @@ async def test_verify_deal_denies_when_price_absent(monkeypatch):
         "XM5", "https://shop.example/xm5", "ShopExample", 147.26, "$147.26", None
     )
 
-    async def fake_unlock(url, country=None, max_chars=16000):
+    async def fake_unlock(url, country=None, max_chars=16000, raw_html=False):
         return {"content": "Sony WH-1000XM5 — $249.99. Add to cart."}
 
     monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
@@ -170,13 +170,99 @@ async def test_verify_deal_denies_when_price_absent(monkeypatch):
     assert deal.price == pytest.approx(147.26)
 
 
+def _ld_page(payload: str) -> str:
+    return f'<html><script type="application/ld+json">{payload}</script></html>'
+
+
+@pytest.mark.asyncio
+async def test_structured_data_beats_the_text_heuristic(monkeypatch):
+    """The page mentions 147.26 in prose, but its real offer is 249.99.
+
+    This is the false confirm the old text-only check produced: a shipping
+    threshold, a "was" price, or a related-item price is enough to "confirm"
+    any number. JSON-LD is authoritative, so the claim must be denied.
+    """
+    deal = Deal(
+        "XM5", "https://shop.example/xm5", "ShopExample", 147.26, "$147.26", None
+    )
+
+    async def fake_unlock(url, country=None, max_chars=16000, raw_html=False):
+        return {
+            "content": _ld_page(
+                '{"@type":"Product","name":"Sony WH-1000XM5",'
+                '"offers":{"@type":"Offer","price":"249.99","priceCurrency":"USD",'
+                '"availability":"https://schema.org/InStock",'
+                '"itemCondition":"https://schema.org/NewCondition"}}'
+            )
+            + "<p>Spend $147.26 more for free shipping. Was $147.26!</p>"
+        }
+
+    monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
+    await finder.verify_deal(deal)
+
+    assert deal.verified is False
+
+
+@pytest.mark.asyncio
+async def test_structured_verification_carries_condition_and_stock(monkeypatch):
+    """A cheap price for a refurb or an out-of-stock unit is worth surfacing."""
+    deal = Deal("XM5", "https://shop.example/xm5", "ShopExample", 99.0, "$99", None)
+
+    async def fake_unlock(url, country=None, max_chars=16000, raw_html=False):
+        return {
+            "content": _ld_page(
+                '{"@type":"Product","offers":{"@type":"Offer","price":"99.00",'
+                '"availability":"https://schema.org/OutOfStock",'
+                '"itemCondition":"https://schema.org/RefurbishedCondition"}}'
+            )
+        }
+
+    monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
+    await finder.verify_deal(deal)
+
+    assert deal.verified is True
+    assert deal.condition == "refurbished"
+    assert deal.availability == "out of stock"
+    assert deal.as_dict()["condition"] == "refurbished"
+
+
+@pytest.mark.asyncio
+async def test_text_fallback_still_runs_without_structured_data(monkeypatch):
+    """Plenty of retailers ship no JSON-LD; those must not go unverified."""
+    deal = Deal("XM5", "https://shop.example/xm5", "ShopExample", 147.26, None, None)
+
+    async def fake_unlock(url, country=None, max_chars=16000, raw_html=False):
+        return {"content": "<html><body>Sony WH-1000XM5 — $147.26</body></html>"}
+
+    monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
+    await finder.verify_deal(deal)
+
+    assert deal.verified is True
+
+
+@pytest.mark.asyncio
+async def test_verification_requests_raw_html(monkeypatch):
+    """JSON-LD lives in <script> tags that the markdown conversion strips."""
+    deal = Deal("XM5", "https://shop.example/xm5", "ShopExample", 10.0, None, None)
+    seen: dict = {}
+
+    async def fake_unlock(url, country=None, max_chars=16000, raw_html=False):
+        seen["raw_html"] = raw_html
+        return {"content": ""}
+
+    monkeypatch.setattr(finder, "unlock_url_api", fake_unlock)
+    await finder.verify_deal(deal)
+
+    assert seen["raw_html"] is True
+
+
 @pytest.mark.asyncio
 async def test_verify_deal_survives_unlocker_failure(monkeypatch):
     deal = Deal(
         "XM5", "https://shop.example/xm5", "ShopExample", 147.26, "$147.26", None
     )
 
-    async def boom(url, country=None, max_chars=16000):
+    async def boom(url, country=None, max_chars=16000, raw_html=False):
         raise RuntimeError("unlocker down")
 
     monkeypatch.setattr(finder, "unlock_url_api", boom)
@@ -192,7 +278,7 @@ async def test_find_deals_verifies_top_results(monkeypatch):
 
     unlocked: list[str] = []
 
-    async def fake_unlock(url, country=None, max_chars=16000):
+    async def fake_unlock(url, country=None, max_chars=16000, raw_html=False):
         unlocked.append(url)
         # Cheapest listing ($349.99) confirms; the other does not.
         return {"content": "price today $349.99"}
@@ -215,7 +301,7 @@ async def test_find_deals_can_skip_verification(monkeypatch):
     async def fake_serp(query, country=None, max_results=10):
         return SAMPLE_SERP
 
-    async def fail_unlock(url, country=None, max_chars=16000):
+    async def fail_unlock(url, country=None, max_chars=16000, raw_html=False):
         raise AssertionError("verification should be skipped")
 
     monkeypatch.setattr(finder, "serp_search_api", fake_serp)
@@ -241,7 +327,7 @@ async def test_find_deals_does_not_verify_by_default(monkeypatch):
     async def fake_serp(query, country=None, max_results=10):
         return SAMPLE_SERP
 
-    async def fail_unlock(url, country=None, max_chars=16000):
+    async def fail_unlock(url, country=None, max_chars=16000, raw_html=False):
         raise AssertionError("find_deals must not verify inline by default")
 
     monkeypatch.setattr(finder, "serp_search_api", fake_serp)
@@ -259,7 +345,7 @@ async def test_verify_top_deals_isolates_a_slow_page(monkeypatch):
 
     monkeypatch.setattr(finder, "VERIFY_PAGE_TIMEOUT_SECONDS", 0.05)
 
-    async def fake_unlock(url, country=None, max_chars=16000):
+    async def fake_unlock(url, country=None, max_chars=16000, raw_html=False):
         if "slow" in url:
             await asyncio.sleep(5)
         return {"content": "price today $10.00"}

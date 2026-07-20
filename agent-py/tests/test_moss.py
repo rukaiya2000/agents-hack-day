@@ -1,17 +1,21 @@
-"""Unit tests for the agent's three Moss-backed tools.
+"""Unit tests for the agent's memory, watchlist, and price-history tools.
 
 Unlike the LLM-judged evals in `test_agent.py`, these are deterministic unit
 tests that exercise the tool methods directly. They stub `MossClient` via
 monkeypatch so they run with no Moss credentials and no network access — the
-live, credentialed behavior is validated in the live-test task.
+live, credentialed behavior is validated in the live-test task. Watches and
+price history hit a real SQLite database, pointed at a tmp file by the autouse
+fixture in `conftest.py`.
 """
 
 import json
+from unittest.mock import ANY
 
 import pytest
 
 import agent as agent_module
-from agent import Assistant
+from agent import Assistant, DocsAgent
+from deal_hunter import store
 
 USER_ID = "user_42"
 
@@ -109,8 +113,10 @@ async def test_search_knowledge_returns_joined_text_and_publishes_context(
 ) -> None:
     """search_knowledge joins snippets and publishes a well-formed payload."""
     room = _FakeRoom()
-    assistant = Assistant(room=room, user_id=USER_ID)
-    assistant._moss.query_result = _FakeSearchResult(
+    moss = _FakeMossClient()
+    # The docs Q&A path lives on its own agent now, reached by handoff.
+    assistant = DocsAgent(room=room, user_id=USER_ID, moss=moss)
+    moss.query_result = _FakeSearchResult(
         [
             _FakeDoc("First snippet.", score=0.9, metadata={"source": "docs"}),
             _FakeDoc("Second snippet.", score=0.8),
@@ -124,8 +130,8 @@ async def test_search_knowledge_returns_joined_text_and_publishes_context(
     assert result == "First snippet.\n\nSecond snippet."
 
     # Queried the knowledge (RAG) index with the user's query.
-    assert len(assistant._moss.query_calls) == 1
-    index, query, options = assistant._moss.query_calls[0]
+    assert len(moss.query_calls) == 1
+    index, query, options = moss.query_calls[0]
     assert index == agent_module.KNOWLEDGE_INDEX
     assert query == "how does turn detection work?"
     assert options.top_k == 3
@@ -150,6 +156,47 @@ async def test_search_knowledge_returns_joined_text_and_publishes_context(
     assert matches[0]["score"] == 0.9
     assert matches[0]["metadata"] == {"source": "docs"}
     assert matches[1]["text"] == "Second snippet."
+
+
+async def test_explain_the_demo_hands_off_to_the_docs_agent(stub_moss) -> None:
+    """Technical questions leave the shopping agent entirely."""
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+
+    handoff = await assistant.explain_the_demo(None)
+
+    assert isinstance(handoff, DocsAgent)
+    # The docs agent needs the same identity and Moss client to do its job.
+    assert handoff._user_id == USER_ID
+    assert handoff._moss is assistant._moss
+
+
+async def test_back_to_shopping_hands_control_back(stub_moss) -> None:
+    docs = DocsAgent(room=_FakeRoom(), user_id=USER_ID, moss=_FakeMossClient())
+
+    handoff = await docs.back_to_shopping(None)
+
+    assert isinstance(handoff, Assistant)
+    assert handoff._user_id == USER_ID
+
+
+def test_the_two_agents_have_disjoint_toolsets(stub_moss) -> None:
+    """The point of the split: neither agent pays for the other's tools."""
+    shopping = {t.info.name for t in Assistant(user_id=USER_ID).tools}
+    docs = {t.info.name for t in DocsAgent(user_id=USER_ID).tools}
+
+    assert "find_deals" in shopping
+    assert "search_knowledge" not in shopping
+    assert "search_knowledge" in docs
+    assert "find_deals" not in docs
+    # The only overlap should be the handoffs that connect them.
+    assert shopping & docs == set()
+
+
+def test_docs_agent_instructions_require_grounding(stub_moss) -> None:
+    instructions = DocsAgent(user_id=USER_ID).instructions
+
+    assert "search_knowledge" in instructions
+    assert "back_to_shopping" in instructions
 
 
 def test_assistant_instructions_describe_deal_hunter(stub_moss) -> None:
@@ -218,35 +265,120 @@ async def test_recall_facts_filters_by_user_id(stub_moss) -> None:
     assert len(room.local_participant.published) == 1
 
 
-async def test_watch_item_stores_structured_watch_and_publishes(stub_moss) -> None:
-    """watch_item writes a `kind=watch` doc and publishes the updated list."""
+async def _no_price(self, product):
+    """Stub for `Assistant._current_best` — no live lookup in unit tests."""
+    return {}
+
+
+class _FakeRpcData:
+    """Stand-in for LiveKit's `RpcInvocationData` (only `.payload` is read)."""
+
+    def __init__(self, payload: str) -> None:
+        self.payload = payload
+        self.caller_identity = "voice_assistant_user_1"
+
+
+class _FakeTurnCtx:
+    """Records messages injected via `turn_ctx.add_message`."""
+
+    def __init__(self) -> None:
+        self.messages: list[tuple] = []
+
+    def add_message(self, role, content):
+        self.messages.append((role, content))
+
+
+async def test_deal_selected_rpc_records_the_selection(stub_moss) -> None:
+    """A click on a deal card reaches the agent and is remembered."""
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+
+    ack = await assistant._on_deal_selected(
+        _FakeRpcData(
+            json.dumps(
+                {
+                    "title": "Sony WH-1000XM5",
+                    "url": "https://example.com/xm5",
+                    "source": "Amazon",
+                    "price": 248.0,
+                }
+            )
+        )
+    )
+
+    assert json.loads(ack) == {"ok": True, "selected": "Sony WH-1000XM5"}
+    assert assistant._selection["title"] == "Sony WH-1000XM5"
+    assert assistant._selection["price"] == 248.0
+
+
+async def test_deal_selected_rpc_can_clear_the_selection(stub_moss) -> None:
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+    await assistant._on_deal_selected(_FakeRpcData(json.dumps({"title": "XM5"})))
+
+    ack = await assistant._on_deal_selected(_FakeRpcData(json.dumps({"cleared": True})))
+
+    assert json.loads(ack) == {"ok": True, "selected": None}
+    assert assistant._selection is None
+
+
+async def test_deal_selected_rpc_survives_malformed_payloads(stub_moss) -> None:
+    """A bad payload from the browser must not raise into the RPC layer."""
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+
+    bad_json = await assistant._on_deal_selected(_FakeRpcData("not json{"))
+    no_title = await assistant._on_deal_selected(_FakeRpcData(json.dumps({"url": "x"})))
+
+    assert json.loads(bad_json)["ok"] is False
+    assert json.loads(no_title)["ok"] is False
+    assert assistant._selection is None
+
+
+async def test_selection_is_injected_into_the_users_turn(stub_moss) -> None:
+    """The on-screen listing reaches the LLM so "this one" resolves."""
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+    await assistant._on_deal_selected(
+        _FakeRpcData(
+            json.dumps({"title": "Sony WH-1000XM5", "source": "Amazon", "price": 248.0})
+        )
+    )
+
+    turn_ctx = _FakeTurnCtx()
+    await assistant.on_user_turn_completed(turn_ctx, _chat_message("watch this one"))
+
+    assert len(turn_ctx.messages) == 1
+    _role, content = turn_ctx.messages[0]
+    assert "Sony WH-1000XM5" in content
+    assert "248" in content
+    assert "Amazon" in content
+
+
+async def test_nothing_is_injected_without_a_selection(stub_moss) -> None:
+    """No selection means no extra tokens on the turn."""
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+
+    turn_ctx = _FakeTurnCtx()
+    await assistant.on_user_turn_completed(turn_ctx, _chat_message("find me a tv"))
+
+    assert turn_ctx.messages == []
+
+
+def _chat_message(text: str):
+    """Minimal stand-in for a `ChatMessage` — the hook only passes it through."""
+    return type("_Msg", (), {"text_content": text})()
+
+
+async def test_watch_item_stores_the_watch_and_publishes(stub_moss) -> None:
+    """watch_item persists to the store and publishes the updated list."""
     room = _FakeRoom()
     assistant = Assistant(room=room, user_id=USER_ID)
-    # The post-write refresh reads the watch back out of Moss.
-    assistant._moss.query_result = _FakeSearchResult(
-        [
-            _FakeDoc(
-                "Watching Sony WH-1000XM5 for a price drop below 130 dollars.",
-                metadata={
-                    "user_id": USER_ID,
-                    "kind": "watch",
-                    "product": "Sony WH-1000XM5",
-                    "target_price": "130.0",
-                },
-            )
-        ]
-    )
 
     reply = await assistant.watch_item(None, "Sony WH-1000XM5", 130)
 
-    # Stored with structured metadata so the UI can render it.
-    assert len(assistant._moss.add_docs_calls) == 1
-    _index, docs, _options = assistant._moss.add_docs_calls[0]
-    metadata = docs[0].metadata
-    assert metadata["kind"] == "watch"
-    assert metadata["product"] == "Sony WH-1000XM5"
-    assert metadata["target_price"] == "130"
-    assert metadata["user_id"] == USER_ID
+    # Persisted durably, not as a semantic memory doc.
+    assert await store.list_watches(USER_ID) == [
+        {"product": "Sony WH-1000XM5", "target_price": 130.0, "created_at": ANY}
+    ]
+    # Watches are not written to Moss any more.
+    assert assistant._moss.add_docs_calls == []
 
     # Spoken confirmation names the product and the target.
     assert "Sony WH-1000XM5" in reply
@@ -257,29 +389,14 @@ async def test_watch_item_stores_structured_watch_and_publishes(stub_moss) -> No
     message = json.loads(payload.decode("utf-8"))
     assert message["type"] == "watchlist"
     assert message["data"]["count"] == 1
-    assert message["data"]["watches"][0] == {
-        "product": "Sony WH-1000XM5",
-        "target_price": 130.0,
-    }
+    assert message["data"]["watches"][0]["product"] == "Sony WH-1000XM5"
+    assert message["data"]["watches"][0]["target_price"] == 130.0
 
 
 async def test_watch_item_without_target_price(stub_moss) -> None:
     """A watch with no threshold still saves and reads back with target None."""
     room = _FakeRoom()
     assistant = Assistant(room=room, user_id=USER_ID)
-    assistant._moss.query_result = _FakeSearchResult(
-        [
-            _FakeDoc(
-                "Watching AirPods Pro for a price drop.",
-                metadata={
-                    "user_id": USER_ID,
-                    "kind": "watch",
-                    "product": "AirPods Pro",
-                    "target_price": "",
-                },
-            )
-        ]
-    )
 
     reply = await assistant.watch_item(None, "AirPods Pro")
 
@@ -289,52 +406,138 @@ async def test_watch_item_without_target_price(stub_moss) -> None:
     assert message["data"]["watches"][0]["target_price"] is None
 
 
-async def test_list_watches_filters_non_watch_memories_and_dedupes(
+async def test_watch_item_is_scoped_to_the_calling_user(stub_moss) -> None:
+    """One user's watch never leaks into another's list."""
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+    other = Assistant(room=_FakeRoom(), user_id="someone-else")
+
+    await assistant.watch_item(None, "Sony WH-1000XM5", 130)
+
+    assert await other.list_watches(None) == "The watchlist is empty right now."
+
+
+async def test_rewatching_updates_the_target_instead_of_duplicating(
     stub_moss, monkeypatch
 ) -> None:
-    """Only `kind=watch` docs count, and repeated products collapse to one."""
+    """ "Watch it under 99 instead" revises the watch rather than adding a second."""
     room = _FakeRoom()
     assistant = Assistant(room=room, user_id=USER_ID)
-    # Keep the live price re-check offline.
     monkeypatch.setattr(Assistant, "_current_best", _no_price)
-    assistant._moss.query_result = _FakeSearchResult(
-        [
-            _FakeDoc(
-                "Watching Sony WH-1000XM5 below 130 dollars.",
-                metadata={
-                    "kind": "watch",
-                    "product": "Sony WH-1000XM5",
-                    "target_price": "130",
-                },
-            ),
-            # A plain remembered fact must not show up as a watch.
-            _FakeDoc("My name is Sam.", metadata={"user_id": USER_ID}),
-            # Duplicate product (different casing) collapses to the first.
-            _FakeDoc(
-                "Watching sony wh-1000xm5 again.",
-                metadata={
-                    "kind": "watch",
-                    "product": "sony wh-1000xm5",
-                    "target_price": "99",
-                },
-            ),
-        ]
-    )
+
+    await assistant.watch_item(None, "Sony WH-1000XM5", 130)
+    await assistant.watch_item(None, "sony wh-1000xm5", 99)
 
     reply = await assistant.list_watches(None)
 
     payload, _reliable = room.local_participant.published[-1]
     message = json.loads(payload.decode("utf-8"))
     assert message["data"]["count"] == 1
-    assert message["data"]["watches"][0]["product"] == "Sony WH-1000XM5"
+    assert message["data"]["watches"][0]["target_price"] == 99.0
     assert "Sony WH-1000XM5" in reply
+
+
+async def test_unwatch_item_removes_and_reports(stub_moss, monkeypatch) -> None:
+    """Stopping a watch clears it, and a no-op unwatch says so honestly."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, user_id=USER_ID)
+    monkeypatch.setattr(Assistant, "_current_best", _no_price)
+    await assistant.watch_item(None, "Sony WH-1000XM5", 130)
+
+    reply = await assistant.unwatch_item(None, "sony wh-1000xm5")
+
+    assert "Removed" in reply
+    assert await store.list_watches(USER_ID) == []
+    payload, _reliable = room.local_participant.published[-1]
+    assert json.loads(payload.decode("utf-8"))["data"]["count"] == 0
+
+    # Removing something that was never watched must not claim success.
+    again = await assistant.unwatch_item(None, "Sony WH-1000XM5")
+    assert "not on your watchlist" in again
+
+
+async def test_a_long_watchlist_is_never_truncated(stub_moss, monkeypatch) -> None:
+    """The regression the old Moss-backed list had: top_k silently dropping rows."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, user_id=USER_ID)
+    monkeypatch.setattr(Assistant, "_current_best", _no_price)
+    for i in range(30):
+        await store.add_watch(USER_ID, f"Product {i}", float(i))
+
+    await assistant.list_watches(None)
+
+    payload, _reliable = room.local_participant.published[-1]
+    assert json.loads(payload.decode("utf-8"))["data"]["count"] == 30
+
+
+async def test_price_history_admits_when_it_has_no_data(stub_moss) -> None:
+    """With nothing tracked it must not manufacture a trend."""
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+
+    reply = await assistant.price_history(None, "Sony WH-1000XM5")
+
+    assert "not tracked" in reply
+    assert "watch it" in reply.lower()
+
+
+async def test_price_history_calls_a_low_price_low(stub_moss) -> None:
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+    for price in (300.0, 280.0, 290.0, 200.0):
+        await store.record_price("Sony WH-1000XM5", price)
+
+    reply = await assistant.price_history(None, "Sony WH-1000XM5")
+
+    assert "200" in reply
+    assert "as low as I have seen" in reply
+
+
+async def test_price_history_suggests_waiting_on_a_high_price(stub_moss) -> None:
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+    for price in (200.0, 210.0, 205.0, 300.0):
+        await store.record_price("Sony WH-1000XM5", price)
+
+    reply = await assistant.price_history(None, "Sony WH-1000XM5")
+
+    assert "worth waiting" in reply
+
+
+async def test_find_deals_records_the_cheapest_price_for_history(
+    stub_moss, monkeypatch
+) -> None:
+    """Each search feeds the history that price_history later reasons over."""
+    from deal_hunter.finder import Deal, DealResult
+
+    result = DealResult(query="Sony WH-1000XM5", country="us")
+    result.deals = [
+        Deal(
+            title="XM5",
+            url="https://example.com/xm5",
+            source="Amazon",
+            price=248.0,
+            price_text="$248",
+            snippet=None,
+        )
+    ]
+
+    async def fake_find(query, **kwargs):
+        return result
+
+    monkeypatch.setattr("deal_hunter.finder.find_deals", fake_find)
+    # Keep background verification off the network.
+    monkeypatch.setattr(Assistant, "_spawn_price_verification", lambda self, r: None)
+
+    assistant = Assistant(room=_FakeRoom(), user_id=USER_ID)
+    await assistant.find_deals(None, "Sony WH-1000XM5")
+
+    stats = await store.price_stats("Sony WH-1000XM5")
+    assert stats["count"] == 1
+    assert stats["latest"] == 248.0
+    assert stats["latest_source"] == "Amazon"
 
 
 async def test_list_watches_empty(stub_moss, monkeypatch) -> None:
     """An empty watchlist reads back cleanly and still publishes."""
     room = _FakeRoom()
     assistant = Assistant(room=room, user_id=USER_ID)
-    assistant._moss.query_result = _FakeSearchResult([])
 
     reply = await assistant.list_watches(None)
 
@@ -345,29 +548,13 @@ async def test_list_watches_empty(stub_moss, monkeypatch) -> None:
     assert message["data"]["count"] == 0
 
 
-async def _no_price(self, product):
-    """Stub for `Assistant._current_best` — no live lookup in unit tests."""
-    return {}
-
-
 async def test_list_watches_attaches_current_price_and_flags_target_hit(
     stub_moss, monkeypatch
 ) -> None:
     """A refreshed watch carries its live price, and a hit target is announced."""
     room = _FakeRoom()
     assistant = Assistant(room=room, user_id=USER_ID)
-    assistant._moss.query_result = _FakeSearchResult(
-        [
-            _FakeDoc(
-                "Watching Sony WH-1000XM5 below 200 dollars.",
-                metadata={
-                    "kind": "watch",
-                    "product": "Sony WH-1000XM5",
-                    "target_price": "200",
-                },
-            )
-        ]
-    )
+    await store.add_watch(USER_ID, "Sony WH-1000XM5", 200.0)
 
     async def fake_best(self, product):
         return {

@@ -53,16 +53,16 @@ async def test_grounding() -> None:
     ):
         await session.start(Assistant())
 
-        # The docs-helper has a per-user memory tool, so a personal question may
-        # route to `recall_facts` first. Mock the Moss-backed tools so the eval
-        # is deterministic and needs no Moss credentials or network — the memory
-        # store legitimately holds nothing for this user. See
+        # A personal question may route to `recall_facts` first. Mock the
+        # Moss-backed tool so the eval is deterministic and needs no Moss
+        # credentials or network — the memory store legitimately holds nothing
+        # for this user. `search_knowledge` lives on DocsAgent now and is not
+        # reachable from this agent, so there is nothing to mock for it. See
         # https://docs.livekit.io/agents/start/testing/test-framework/#mocking-tools
         with mock_tools(
             Assistant,
             {
                 "recall_facts": lambda: "I don't have anything remembered for you yet.",
-                "search_knowledge": lambda: "No relevant documentation was found.",
             },
         ):
             # Run an agent turn following the user's request for information about their birth city (not known by the agent)
