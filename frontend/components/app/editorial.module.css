@@ -22,6 +22,7 @@
   text-rendering: optimizeLegibility;
 }
 
+/* The OS preference is the default signal... */
 @media (prefers-color-scheme: dark) {
   .root {
     --bg: #1a1613;
@@ -36,8 +37,24 @@
   }
 }
 
-.root :global(:root[data-theme='dark']) &,
-:global(:root[data-theme='dark']) .root {
+/* ...but an explicit choice from the theme toggle wins, in both directions.
+   next-themes is mounted with attribute="class" (app/layout.tsx), so it
+   stamps `class="light"` / `class="dark"` on <html> — not `data-theme`.
+   The light rule is what stops a light selection from being overridden by a
+   dark OS preference. */
+:global(html.light) .root {
+  --bg: #fafaf9;
+  --surface: #ffffff;
+  --text: #1c1917;
+  --muted: #78716c;
+  --faint: #a8a29e;
+  --line: #e7e5e4;
+  --line-strong: #d6d3d1;
+  --accent: #ea580c;
+  --accent-ink: #c2410c;
+}
+
+:global(html.dark) .root {
   --bg: #1a1613;
   --surface: #211c18;
   --text: #f6f3f0;
