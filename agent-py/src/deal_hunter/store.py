@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import trust
+
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "deal_hunter.db"
 
 _SCHEMA = """
@@ -47,7 +49,41 @@ CREATE TABLE IF NOT EXISTS price_observations (
 
 CREATE INDEX IF NOT EXISTS idx_obs_product_time
     ON price_observations (product_key, observed_at);
+
+CREATE TABLE IF NOT EXISTS selections (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id        TEXT NOT NULL,
+    product_key    TEXT NOT NULL,
+    product        TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    -- Display label as shown to the user ("Best Buy"), which may or may not be
+    -- a domain. Never trust-checked: `domain` is the field with authority.
+    source         TEXT,
+    -- Hostname parsed from the listing URL. Trust decisions key off this,
+    -- because a display name is attacker-chosen free text.
+    domain         TEXT,
+    price          REAL,
+    -- 0-based position in the ranked list the user was actually looking at.
+    -- NULL when the click could not be matched to a published result.
+    rank_shown     INTEGER,
+    -- The cheapest price on offer at that moment. Stored alongside rather than
+    -- recomputed later: prices move, so "what premium did they accept" is only
+    -- answerable against the list they actually saw.
+    cheapest_price REAL,
+    observed_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sel_user_time
+    ON selections (user_id, observed_at);
 """
+
+# Below this many clicks, a "preference" is indistinguishable from noise, and
+# the profile reports itself as not confident. Same stance as `verdict()`:
+# silence beats a fabricated pattern.
+MIN_SELECTIONS_FOR_PROFILE = 3
+# A source has to win a real share of clicks to count as preferred, so a single
+# outlier in a small sample doesn't get promoted to a habit.
+PREFERRED_SOURCE_SHARE = 0.5
 
 
 def product_key(product: str) -> str:
@@ -222,6 +258,154 @@ async def record_prices(product: str, deals: list[Any]) -> None:
 
 async def price_stats(product: str, days: int = 90) -> dict[str, Any]:
     return await asyncio.to_thread(_price_stats_sync, product, days)
+
+
+# --- selections (learned preferences) --------------------------------------
+
+
+def _record_selection_sync(
+    user_id: str,
+    product: str,
+    title: str,
+    source: str | None,
+    domain: str | None,
+    price: float | None,
+    rank_shown: int | None,
+    cheapest_price: float | None,
+) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO selections
+                (user_id, product_key, product, title, source, domain, price,
+                 rank_shown, cheapest_price, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                product_key(product),
+                product.strip(),
+                title.strip(),
+                source,
+                domain,
+                price,
+                rank_shown,
+                cheapest_price,
+                _now(),
+            ),
+        )
+
+
+def _list_selections_sync(user_id: str, limit: int) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT product, title, source, domain, price, rank_shown,
+                   cheapest_price, observed_at
+            FROM selections WHERE user_id = ?
+            ORDER BY observed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+async def record_selection(
+    user_id: str,
+    *,
+    product: str,
+    title: str,
+    source: str | None = None,
+    url: str | None = None,
+    price: float | None = None,
+    rank_shown: int | None = None,
+    cheapest_price: float | None = None,
+) -> None:
+    """Log that the user chose this listing out of the ranked list they saw.
+
+    This is the only place the system learns what a shopper actually *wants*
+    rather than what merely sorted first. Called from the `deal_selected` RPC
+    handler, so it must never raise into a voice turn — callers treat it as
+    best-effort.
+    """
+    await asyncio.to_thread(
+        _record_selection_sync,
+        user_id,
+        product,
+        title,
+        source,
+        trust.domain_of(url, fallback=source),
+        price,
+        rank_shown,
+        cheapest_price,
+    )
+
+
+async def list_selections(user_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(_list_selections_sync, user_id, limit)
+
+
+async def preference_profile(user_id: str) -> dict[str, Any]:
+    """What this user's clicks say about how they shop.
+
+    Returns `confident: False` until there is enough evidence to say anything
+    honest, in which case every derived field stays empty/false. Callers should
+    branch on `confident` rather than on the presence of a key.
+
+    Derived fields:
+      preferred_sources: retailers winning at least `PREFERRED_SOURCE_SHARE` of
+        clicks, most-clicked first.
+      skips_cheapest: True when they usually pick something other than rank 0.
+      avg_premium: mean dollars paid above the cheapest option on offer.
+    """
+    rows = await list_selections(user_id)
+    profile: dict[str, Any] = {
+        "count": len(rows),
+        "confident": len(rows) >= MIN_SELECTIONS_FOR_PROFILE,
+        "preferred_sources": [],
+        "skips_cheapest": False,
+        "avg_premium": None,
+    }
+    if not profile["confident"]:
+        return profile
+
+    # Grouped by domain, which is what trust can be decided on, but labelled
+    # with the display name, which is what sounds right spoken aloud.
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for row in rows:
+        domain = (row["domain"] or "").strip()
+        if not domain:
+            continue
+        counts[domain] = counts.get(domain, 0) + 1
+        labels.setdefault(domain, (row["source"] or "").strip() or domain)
+
+    threshold = len(rows) * PREFERRED_SOURCE_SHARE
+    profile["preferred_sources"] = [
+        labels[domain]
+        for domain, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        # A preference is spoken aloud as "you usually buy from X", which is the
+        # agent vouching for X. Clicks alone must never promote an unvetted
+        # storefront into that sentence — otherwise a user who was taken in once
+        # has the agent recommending the same site back to them afterwards.
+        if n >= threshold and trust.tier(domain) in {"trusted", "marketplace"}
+    ]
+
+    ranked = [r for r in rows if r["rank_shown"] is not None]
+    if ranked:
+        skipped = sum(1 for r in ranked if r["rank_shown"] > 0)
+        profile["skips_cheapest"] = skipped > len(ranked) / 2
+
+    premiums = [
+        r["price"] - r["cheapest_price"]
+        for r in rows
+        if r["price"] is not None and r["cheapest_price"] is not None
+    ]
+    if premiums:
+        profile["avg_premium"] = round(sum(premiums) / len(premiums), 2)
+
+    return profile
 
 
 def verdict(stats: dict[str, Any]) -> str | None:

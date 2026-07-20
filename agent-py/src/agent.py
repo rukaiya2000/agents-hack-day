@@ -351,6 +351,12 @@ class Assistant(Agent):
                   is so cheap or whether a listing is trustworthy, call
                   `explain_price`. A cheapest listing that is refurbished,
                   used, an accessory, or an import is worth flagging unprompted.
+                - When a tool result says it would skip a listing, or that it
+                  does not recognize the store, always pass that warning on in
+                  your reply. Never present a listing you were warned about as
+                  the price to buy at — not even if the user asked only for the
+                  cheapest. Say what the cheap listing costs, say why it looks
+                  wrong, and give them the price you do trust.
                 - For quality questions ("is it any good", "what's wrong with
                   it"), call `read_reviews`. For codes and discounts at a
                   store, call `find_coupon`.
@@ -398,6 +404,10 @@ class Assistant(Agent):
         # RPC. Lets "watch this one" resolve to an actual listing instead of
         # the agent guessing from conversation history alone.
         self._selection: dict[str, Any] | None = None
+        # The last ranked result published to the UI. Kept so a click can be
+        # scored against the list the user was actually looking at — the browser
+        # sends only the chosen listing, not its rank or what it beat.
+        self._last_result: Any | None = None
         # Strong refs for fire-and-forget work (background price verification),
         # so the event loop doesn't garbage-collect a running task.
         self._background_tasks: set[asyncio.Task] = set()
@@ -481,7 +491,44 @@ class Assistant(Agent):
             "price": payload.get("price"),
         }
         logger.info("User selected listing on screen: %s", title)
+        await self._record_selection(title, payload)
         return json.dumps({"ok": True, "selected": title})
+
+    async def _record_selection(self, title: str, payload: dict[str, Any]) -> None:
+        """Persist the click as preference evidence, scored against its ranking.
+
+        Best-effort by design: this runs inside an RPC handler on the voice
+        path, and failing to learn from a click must never break selecting one.
+        """
+        rank: int | None = None
+        cheapest: float | None = None
+        product = title
+
+        result = self._last_result
+        if result is not None:
+            product = getattr(result, "query", None) or title
+            deals = getattr(result, "deals", None) or []
+            for index, deal in enumerate(deals):
+                if (getattr(deal, "title", "") or "").strip() == title:
+                    rank = index
+                    break
+            priced = [d for d in deals if getattr(d, "price", None) is not None]
+            if priced:
+                cheapest = priced[0].price
+
+        try:
+            await store.record_selection(
+                self._user_id,
+                product=product,
+                title=title,
+                source=payload.get("source"),
+                url=payload.get("url"),
+                price=payload.get("price"),
+                rank_shown=rank,
+                cheapest_price=cheapest,
+            )
+        except Exception:
+            logger.exception("Failed to record selection; continuing")
 
     def _selection_note(self) -> str | None:
         """One plain sentence describing what is on screen, for the LLM."""
@@ -546,8 +593,12 @@ class Assistant(Agent):
             query: The product the user wants to shop for, e.g.
                 "Sony WH-1000XM5 headphones" or "cheapest RTX 4090".
         """
+        from deal_hunter.finder import (
+            annotate_preferences,
+            assess_deals,
+            voice_summary,
+        )
         from deal_hunter.finder import find_deals as run_find_deals
-        from deal_hunter.finder import voice_summary
         from deal_hunter.query import is_vague_query
 
         # "Find me headphones" cannot be priced usefully. Narrow it first, in a
@@ -574,6 +625,17 @@ class Assistant(Agent):
             query,
             len(result.deals),
         )
+        # Grade the storefronts before anything is spoken or rendered. Ranking
+        # by price alone hands the headline to whichever site posted the least
+        # plausible number, so this has to run on every search — not only when
+        # the model happens to call `explain_price`.
+        assess_deals(result)
+        # Fold in what past clicks taught us about this shopper. Annotation
+        # only — the list stays cheapest-first, so the spoken "best price"
+        # claim and the on-screen ranking both stay literally true.
+        annotate_preferences(result, await self._preference_profile())
+        self._last_result = result
+
         await self._publish_deal_result(result)
         # Every search is a datapoint. Logging the cheapest offer builds the
         # history that `price_history` later reasons over — without this the
@@ -581,6 +643,18 @@ class Assistant(Agent):
         await store.record_prices(query, result.deals)
         self._spawn_price_verification(result)
         return voice_summary(result)
+
+    async def _preference_profile(self) -> dict[str, Any] | None:
+        """This user's learned shopping preferences, or None if unavailable.
+
+        Best-effort: a search must still work when there is no history yet, or
+        when the store cannot be read.
+        """
+        try:
+            return await store.preference_profile(self._user_id)
+        except Exception:
+            logger.exception("Failed to load preference profile; continuing without")
+            return None
 
     def _spawn_price_verification(self, result) -> None:
         """Confirm the top prices in the background, then refresh the UI cards.

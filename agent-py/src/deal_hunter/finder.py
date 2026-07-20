@@ -71,6 +71,14 @@ class Deal:
     # any: "in stock"/"out of stock", "new"/"refurbished"/"used".
     availability: str | None = None
     condition: str | None = None
+    # True when this listing is from a retailer the user has repeatedly chosen
+    # before. Set by `annotate_preferences`, never by the search itself.
+    preferred: bool = False
+    # How far to trust the storefront: "ok", "caution", or "high" (risk).
+    # Set by `assess_deals`; defaults to "ok" so an unassessed result reads
+    # exactly as it did before trust checking existed.
+    risk: str = "ok"
+    risk_reasons: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -83,6 +91,9 @@ class Deal:
             "verified": self.verified,
             "availability": self.availability,
             "condition": self.condition,
+            "preferred": self.preferred,
+            "risk": self.risk,
+            "risk_reasons": self.risk_reasons,
         }
 
 
@@ -300,6 +311,65 @@ async def find_deals(
     return result
 
 
+def assess_deals(result: DealResult) -> DealResult:
+    """Grade every listing's storefront, so ranking by price can't promote fraud.
+
+    Annotates in place and never removes anything: the cheap suspicious listing
+    stays visible and stays cheapest — `voice_summary` simply refuses to read it
+    out as "the best price" without saying why it looks wrong. Hiding it would
+    both patronize the user and conceal our own false positives.
+    """
+    from . import trust
+
+    for deal in result.deals:
+        risk = trust.assess(deal, [d for d in result.deals if d is not deal])
+        deal.risk = risk.level
+        deal.risk_reasons = risk.reasons
+    return result
+
+
+def annotate_preferences(
+    result: DealResult, profile: dict[str, Any] | None
+) -> DealResult:
+    """Flag listings from retailers this user keeps choosing.
+
+    Deliberately annotates rather than re-sorts. `voice_summary` opens with
+    "the best price I found", and the UI cards are read as a cheapest-first
+    ranking — quietly promoting a pricier listing because of a learned habit
+    would make both of those claims false. The preference surfaces as an
+    explicit, secondary note instead, which is also the only form the user can
+    disagree with.
+
+    Mutates and returns `result`. A missing or low-evidence profile is a no-op.
+    """
+    if not profile or not profile.get("confident"):
+        return result
+
+    preferred = {s.casefold() for s in profile.get("preferred_sources") or []}
+    if not preferred:
+        return result
+
+    for deal in result.deals:
+        if deal.source and deal.source.casefold() in preferred:
+            deal.preferred = True
+    return result
+
+
+def preferred_pick(result: DealResult) -> Deal | None:
+    """The cheapest preferred listing, when it isn't already the top result.
+
+    Returns None when the user's usual store already won on price — there is
+    nothing to add, and saying it anyway turns a learned preference into noise.
+    """
+    priced = [d for d in result.deals if d.price is not None]
+    if not priced:
+        return None
+    best = priced[0]
+    if best.preferred:
+        return None
+    return next((d for d in priced if d.preferred), None)
+
+
 def _spell_price(deal: Deal) -> str:
     """Human/voice-friendly price phrase for a deal."""
     if deal.price is not None:
@@ -333,7 +403,21 @@ def voice_summary(result: DealResult, top_n: int = 3) -> str:
             "Want me to open one and read the details?"
         )
 
-    best = priced[0]
+    # Lead with the cheapest listing we would actually stand behind. Ranking by
+    # price alone hands the headline to whichever storefront picked the most
+    # implausible number, which is exactly what a fake shop is optimizing for.
+    trustworthy = [d for d in priced if d.risk != "high"]
+    # Cheaper listings passed over on trust grounds. Compared by identity, not
+    # equality: two listings can be field-identical across mirrored storefronts.
+    skipped = (
+        [d for d in priced if d is not trustworthy[0] and d.risk == "high"]
+        if trustworthy
+        else []
+    )
+    # Everything is high-risk: still answer, but lead with the warning rather
+    # than going silent — the user asked a question and deserves the finding.
+    best = trustworthy[0] if trustworthy else priced[0]
+
     best_source = f" at {best.source}" if best.source else ""
     # Only claim confirmation when we actually opened the listing page.
     confirmation = ""
@@ -341,16 +425,43 @@ def voice_summary(result: DealResult, top_n: int = 3) -> str:
         confirmation = " I confirmed that on the listing page."
     elif best.verified is False:
         confirmation = " I couldn't confirm that on the page, so double-check it."
-    lines = [
-        f"The best price I found for {result.query} is "
-        f"{_spell_price(best)}{best_source}.{confirmation}"
-    ]
-    others = priced[1:top_n]
+
+    lines = []
+    if skipped:
+        lines.append(
+            f"The cheapest listing for {result.query} is "
+            f"{_spell_price(skipped[0])}, but I would skip it. "
+            + " ".join(skipped[0].risk_reasons)
+        )
+        lines.append(
+            f"The best price I trust is {_spell_price(best)}{best_source}.{confirmation}"
+        )
+    else:
+        lines.append(
+            f"The best price I found for {result.query} is "
+            f"{_spell_price(best)}{best_source}.{confirmation}"
+        )
+        # Not suspicious enough to skip, but not a name we can vouch for.
+        if best.risk == "caution" and best.risk_reasons:
+            lines.append(" ".join(best.risk_reasons))
+
+    # High-risk listings are named in the skip line above, never resold here as
+    # a casual "other option".
+    others = [d for d in priced if d is not best and d.risk != "high"][: top_n - 1]
     if others:
         extra = "; ".join(
             f"{_spell_price(d)}" + (f" at {d.source}" if d.source else "")
             for d in others
         )
         lines.append(f"Other options: {extra}.")
+
+    # Learned preference, offered after the honest cheapest-first answer.
+    pick = preferred_pick(result)
+    if pick is not None and pick.source:
+        lines.append(
+            f"You usually buy from {pick.source}, and they have it for "
+            f"{_spell_price(pick)}."
+        )
+
     lines.append("Want me to watch this and tell you if the price drops?")
     return " ".join(lines)
